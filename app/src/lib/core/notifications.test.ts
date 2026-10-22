@@ -168,6 +168,15 @@ describe("maybeNotifyAgentCommit", () => {
     );
   });
 
+  // A commit in a checkout other agents are working in leaves their files
+  // on purpose (git/sharedCommit.ts): it is a commit, and says what it left.
+  it("reports a partial commit in a shared checkout as committed", () => {
+    expect(agentCommitBody("gavin", { kind: "committed", leftForPeers: 3 })).toBe(
+      "gavin: changes committed, 3 left for the agents still working"
+    );
+    expect(agentCommitBody("gavin", { kind: "committed", leftForPeers: 0 })).toBe("gavin: changes committed");
+  });
+
   // The whole point of the card: the human clicked the button and went
   // to work on another tab. Being inside the app is not being told.
   it("still notifies a focused window that is showing some other tab", async () => {

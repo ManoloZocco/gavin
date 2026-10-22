@@ -58,7 +58,23 @@ vi.mock("$lib/core/backend", () => ({
   setSessionName: vi.fn().mockResolvedValue(undefined),
   adoptSession: vi.fn().mockResolvedValue(true),
   killSession: vi.fn().mockResolvedValue(undefined),
+  // A commit in a checkout other agents are live in asks which files each
+  // of them touched (git/sharedCommitState.ts).
+  cardRunTouchedFiles: vi.fn(),
+  shellWrites: vi.fn(),
 }));
+// The sessions a test declares live in the checkout. Everything else
+// answers as the real rule does.
+const { livePeerIds } = vi.hoisted(() => ({ livePeerIds: new Set<string>() }));
+vi.mock("$lib/core/workspace", async (original) => {
+  const real = await original<typeof import("$lib/core/workspace")>();
+  return {
+    ...real,
+    sessionLiveness: vi.fn((state: Parameters<typeof real.sessionLiveness>[0], id: string) =>
+      livePeerIds.has(id) ? "live" : real.sessionLiveness(state, id)
+    ),
+  };
+});
 // pty-output listeners are collected so a test can push a hidden run's
 // output at them; every other event keeps the inert default.
 const ptyListeners: Array<(e: { payload: [string, string] }) => void> = [];
@@ -156,6 +172,7 @@ import {
 } from "$lib/git/gitState";
 import { deviceLaunchRefusal, queuedCount } from "$lib/agents/launchQueue";
 import { maybeNotifyAgentCommit } from "$lib/core/notifications";
+import { kanbanState } from "$lib/board/kanbanState";
 import type { RefsSnapshot, RepoInfo, StatusResult } from "$lib/git/git";
 
 const snapshot: RefsSnapshot = {
@@ -181,6 +198,9 @@ beforeEach(() => {
   sessionExits.set(new Map());
   layoutState.set({ workspaces: [], activeWorkspaceId: null, interruptedSessionIds: new Set() } as never);
   ptyListeners.length = 0;
+  // Nobody else in the checkout unless a test says so.
+  kanbanState.set({});
+  livePeerIds.clear();
   vi.mocked(backend.gitRepoInfo).mockResolvedValue(repo);
   vi.mocked(backend.gitStatus).mockResolvedValue(status);
   vi.mocked(backend.gitDiff).mockResolvedValue({ path: "a.ts", binary: false, tooLarge: false, hunks: [] });
@@ -1678,6 +1698,130 @@ describe("the commit run's automatic retry", () => {
     await vi.advanceTimersByTimeAsync(120_000);
     expect(backend.createSession).not.toHaveBeenCalled();
     vi.useRealTimers();
+  });
+});
+
+// Other agents live in the checkout: the commit is narrowed to per-path
+// staging of what is not theirs, and what it leaves for them is not held
+// against it (git/sharedCommit.ts).
+describe("commit via agent in a shared checkout", () => {
+  const flush = async (): Promise<void> => {
+    for (let i = 0; i < 40; i++) await Promise.resolve();
+  };
+
+  async function launch(): Promise<{ done: Promise<boolean> }> {
+    ensureGitView("ws", "/r");
+    await refresh("ws");
+    const done = commitViaAgent("ws");
+    await flush();
+    return { done };
+  }
+
+  function exitWith(code: number): void {
+    sessionExits.set(new Map([["agent-1", code]]));
+  }
+
+  /// A live card session launched in the checkout, whose transcript says
+  /// it touched `paths` (null: the transcript cannot be read).
+  function peer(paths: string[] | null): void {
+    kanbanState.set({
+      ws: {
+        columns: [],
+        labels: [],
+        cardSessions: [{ path: "/r/plans/peer.md", sessionId: "peer-1", cwd: "/r", launchCwd: "/r", conversationId: "conv-peer" }],
+      },
+    });
+    livePeerIds.add("peer-1");
+    vi.mocked(backend.cardRunTouchedFiles).mockImplementation(async (_c, _cwd, _root, candidates) =>
+      paths === null ? { kind: "unavailable", reason: "gone" } : { kind: "ready", paths: paths.filter((p) => candidates.includes(p)) }
+    );
+  }
+
+  function prompt(): string {
+    return vi.mocked(backend.createSession).mock.calls[0]![1] ?? "";
+  }
+
+  it("sends the configured prompt untouched when nobody else is live", async () => {
+    const { done } = await launch();
+    expect(prompt()).not.toContain("Other agents are working");
+    expect(backend.cardRunTouchedFiles).not.toHaveBeenCalled();
+    exitWith(0);
+    await done;
+  });
+
+  it("names the live agent and lists only the files that are not theirs", async () => {
+    peer(["u.txt"]);
+    const { done } = await launch();
+    expect(prompt()).toContain("Other agents are working in this checkout right now (peer.md).");
+    expect(prompt()).toContain("`a.ts`");
+    expect(prompt()).toContain("`n.ts`");
+    expect(prompt()).not.toContain("`u.txt`");
+    expect(backend.cardRunTouchedFiles).toHaveBeenCalledWith("conv-peer", "/r", "/r", ["a.ts", "u.txt", "n.ts"], null);
+    exitWith(0);
+    await done;
+  });
+
+  it("calls a run that left only the peer's file committed, not left-dirty", async () => {
+    peer(["u.txt"]);
+    const { done } = await launch();
+    vi.mocked(backend.gitStatus).mockResolvedValue({ unstaged: [{ path: "u.txt", status: "?" }], staged: [] });
+    exitWith(0);
+    expect(await done).toBe(true);
+    expect(get(gitStore)["ws"].error).toBeNull();
+    expect(agentCommitPhase(get(gitStore)["ws"])).toBe("done");
+    await flush();
+    expect(vi.mocked(maybeNotifyAgentCommit).mock.calls[0]![1]).toEqual({ kind: "committed", leftForPeers: 1 });
+  });
+
+  it("still calls a run that left its own file left-dirty, counting only its own", async () => {
+    peer(["u.txt"]);
+    const { done } = await launch();
+    vi.mocked(backend.gitStatus).mockResolvedValue({
+      unstaged: [{ path: "a.ts", status: "M" }, { path: "u.txt", status: "?" }],
+      staged: [],
+    });
+    exitWith(0);
+    expect(await done).toBe(false);
+    expect(get(gitStore)["ws"].error).toBe("Commit via agent left 1 change uncommitted");
+  });
+
+  it("falls back to judging by reading when the peer cannot be read, and holds nothing left against it", async () => {
+    peer(null);
+    const { done } = await launch();
+    expect(prompt()).toContain("Commit only changes you can confidently attribute to finished work");
+    exitWith(0);
+    expect(await done).toBe(true);
+    expect(get(gitStore)["ws"].error).toBeNull();
+  });
+
+  it("holds a run launched alone to the tree it was launched on when a peer arrives", async () => {
+    const { done } = await launch();
+    peer(["late.ts"]);
+    vi.mocked(backend.gitStatus).mockResolvedValue({ unstaged: [{ path: "late.ts", status: "?" }], staged: [] });
+    exitWith(0);
+    expect(await done).toBe(true);
+    expect(get(gitStore)["ws"].error).toBeNull();
+  });
+
+  it("still fails that run when a file it was asked to commit is left", async () => {
+    const { done } = await launch();
+    peer(["late.ts"]);
+    vi.mocked(backend.gitStatus).mockResolvedValue({
+      unstaged: [{ path: "a.ts", status: "M" }, { path: "late.ts", status: "?" }],
+      staged: [],
+    });
+    exitWith(0);
+    expect(await done).toBe(false);
+    expect(get(gitStore)["ws"].error).toBe("Commit via agent left 1 change uncommitted");
+  });
+
+  it("does not call a watched run's leftovers a failure while a peer is live", async () => {
+    ensureGitView("ws", "/r");
+    await refresh("ws");
+    showAgentCommit("ws", { sessionId: "agent-1", startedAt: 1_000, stopping: false });
+    peer(["u.txt"]);
+    await concludeShownAgentCommit("ws", false);
+    expect(get(gitStore)["ws"].error).toBeNull();
   });
 });
 

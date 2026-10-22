@@ -247,8 +247,12 @@ export async function maybeNotifyReviewWait(
 /// outcomes `watchAgentCommit` actually reaches: a run abandoned by a
 /// worktree switch, or one whose session died with the last window,
 /// reaches no verdict at all and so has nothing to announce.
+///
+/// `leftForPeers` is a commit in a checkout other agents are working in
+/// that left their changes alone, as it was told to (git/sharedCommit.ts):
+/// committed, not left-dirty. Absent when nothing was left.
 export type AgentCommitVerdict =
-  | { kind: "committed" }
+  | { kind: "committed"; leftForPeers?: number }
   | { kind: "failed"; exitCode: number }
   | { kind: "left-dirty"; changes: number };
 
@@ -257,8 +261,12 @@ export type AgentCommitVerdict =
 /// body long enough to quote them would be truncated by the OS anyway.
 export function agentCommitBody(label: string, verdict: AgentCommitVerdict): string {
   switch (verdict.kind) {
-    case "committed":
-      return `${label}: changes committed`;
+    case "committed": {
+      const n = verdict.leftForPeers ?? 0;
+      return n > 0
+        ? `${label}: changes committed, ${n} left for the agents still working`
+        : `${label}: changes committed`;
+    }
     case "failed":
       return `${label}: commit agent failed (exit ${verdict.exitCode})`;
     case "left-dirty":

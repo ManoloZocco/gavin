@@ -136,6 +136,7 @@ import { stepsFromTemplate } from "$lib/orchestration/orchestrationGroups";
 import type { GroupTemplate } from "$lib/orchestration/orchestrationGroups";
 import { fetchTools, libraryFor, toolRecords } from "$lib/orchestration/toolsState";
 import { kanbanState, cardSessionFor, linkCardSessionAction } from "$lib/board/kanbanState";
+import { commitBodyForCheckout } from "$lib/git/sharedCommitState";
 import { breakOutChildren, guardCompletion } from "$lib/cards/cardCompletion";
 import { gavinTrees, patchPlanField, worktreeSetups } from "$lib/core/gavinState";
 import { gitStore, refresh as refreshGit } from "$lib/git/gitState";
@@ -1440,7 +1441,19 @@ async function executeToolLaunch(
     return false;
   }
 
-  const body = resolveToolBody(tool, stepParams(step));
+  // Commit changes, in a checkout other agents are live in, commits only
+  // what this rail's own cards wrote and stages it path by path -- the
+  // way Consolidate repo always has -- rather than every file it finds,
+  // half-written ones included (git/sharedCommit.ts).
+  const body =
+    tool.kind === "agent" && tool.id === "builtin:commit"
+      ? await commitBodyForCheckout(
+          workspaceId,
+          cwd,
+          resolveToolBody(tool, stepParams(step)),
+          rail.stages.flatMap((s) => s.steps).filter((t) => !t.toolId).map((t) => t.cardPath)
+        )
+      : resolveToolBody(tool, stepParams(step));
   let agent = resolvedAgentFor(workspaceId, cwd);
   if (tool.kind === "agent") {
     // A rail step is unattended: Cursor's MCP dialog would stall with
