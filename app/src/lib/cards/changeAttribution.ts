@@ -127,7 +127,12 @@ function normalizePath(path: string): string {
 /// `.gavin-worktrees` folder, which holds OTHER checkouts of the same
 /// repository. Deeper in the tree is not the same working tree there,
 /// and a run in one never edits this checkout's diff.
-function isInside(dir: string, root: string): boolean {
+///
+/// Exported for `sharedCheckout.ts`, which asks the same question of
+/// LIVE sessions before a launch or a commit: one definition of "the
+/// same checkout", so a board warning and an attribution request can
+/// never disagree about who shares a tree.
+export function isInside(dir: string, root: string): boolean {
   const d = normalizePath(dir);
   const r = normalizePath(root);
   if (d === r) return true;

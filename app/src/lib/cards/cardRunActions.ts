@@ -8,9 +8,11 @@ import { get } from "svelte/store";
 import * as backend from "$lib/core/backend";
 import { withoutHeadroom } from "$lib/agents/compression";
 import { noteReopenedConversation } from "$lib/agents/headroomMarkState";
-import { agentForCard, agentForProfile, armFailureDetection, baseShaForLaunch, cardReviewed, conversationIdForLaunch, layoutState, handleAgentSessionSpawned, prepareCursorAgentLaunch, profileIdForLaunch, promptExtrasFor, resolvedAgentFor, setSessionName, switchWorkspace, switchWorkspaceView, switchToSessionInPage, workspaceRootPath } from "$lib/core/layoutState";
+import { agentForCard, agentForProfile, armFailureDetection, baseShaForLaunch, cardReviewed, configTrustFor, conversationIdForLaunch, layoutState, handleAgentSessionSpawned, prepareCursorAgentLaunch, profileIdForLaunch, promptExtrasFor, resolvedAgentFor, setSessionName, switchWorkspace, switchWorkspaceView, switchToSessionInPage, workspaceRootPath } from "$lib/core/layoutState";
 import type { ResolvedAgent } from "$lib/core/settings";
-import { gavinTrees } from "$lib/core/gavinState";
+import { gavinTrees, worktreeSetups } from "$lib/core/gavinState";
+import { discardWorktrees, forkWorktree } from "$lib/git/gitState";
+import { setupPlan } from "$lib/git/worktreeSetup";
 import { findSessionLocation } from "$lib/core/workspace";
 import type { AttentionRow } from "$lib/agents/attentionInbox";
 import { cardSessionState } from "$lib/board/columnRunAction";
@@ -63,7 +65,7 @@ import { INTERRUPTED_REASON, shouldQueueForMainAgent, bracketedPaste } from "$li
 import { queueFollowUp, queueTargetFor } from "$lib/agents/queuedInputActions";
 import { inputLockedReason } from "$lib/core/sessionOwnershipState";
 import { cardViewForPath, type CardView } from "$lib/core/planBoard";
-import { holdOrQueue, type CardIntent, type NewLaunchIntent } from "$lib/agents/launchQueue";
+import { holdOrQueue, type CardIntent, type CardWorktreeLaunch, type NewLaunchIntent } from "$lib/agents/launchQueue";
 import { launchDecision } from "$lib/agents/agentPauseState";
 import { isSshWorkspace, sshRunBlocked } from "$lib/workspace/sshWorkspace";
 import { sshLinks } from "$lib/workspace/sshLinkState";
@@ -330,9 +332,13 @@ export function sshLaunchBlocker(workspaceId: string): string | null {
 export function runCard(
   workspaceId: string,
   card: CardView,
-  host: CardLaunchHost = DESK_LAUNCH_HOST
+  host: CardLaunchHost = DESK_LAUNCH_HOST,
+  /// "Each in its own worktree" (sharedCheckout.ts): fork this branch
+  /// into this folder and run the card there instead of in the shared
+  /// checkout. Null is the ordinary board Run.
+  worktree: CardWorktreeLaunch | null = null
 ): Promise<string | null> {
-  return launchCard(workspaceId, card, "run", { host });
+  return launchCard(workspaceId, card, "run", { host, ...(worktree ? { worktree } : {}) });
 }
 
 // Launch as new session: a Run of the card AS IT IS NOW, for a card that
@@ -588,10 +594,20 @@ async function launchCard(
   workspaceId: string,
   card: CardView,
   mode: "run" | "resume" | "review" | "new-session",
-  options: { automatic?: boolean; queued?: boolean; withoutHeadroom?: boolean; host?: CardLaunchHost } = {}
+  options: {
+    automatic?: boolean;
+    queued?: boolean;
+    withoutHeadroom?: boolean;
+    host?: CardLaunchHost;
+    worktree?: CardWorktreeLaunch;
+  } = {}
 ): Promise<string | null> {
   if (card.kind === "note") return "Notes are not runnable";
   const host = options.host ?? DESK_LAUNCH_HOST;
+  // A worktree of its own is a RUN's alone. A resume or a review has to
+  // happen where the work already is, and a new session beside a bound
+  // one is a re-run of work in the checkout it was done in.
+  const worktree = mode === "run" ? (options.worktree ?? null) : null;
 
   // A new session is asked for BESIDE a bound one, so a live binding is
   // the one thing it must not jump to and call done (launchCardAsNewSession).
@@ -700,6 +716,9 @@ async function launchCard(
       // Headroom broke that came back as an ordinary one would be
       // decided against the proxy it broke on.
       ...(options.withoutHeadroom ? { withoutHeadroom: true as const } : {}),
+      // And the checkout the confirm named, for the same reason: the
+      // launch that comes back from the queue is the one the human chose.
+      ...(worktree ? { worktree } : {}),
     });
     // At the desk a held launch is QUEUED, and its error is null rather
     // than the sentence: being queued is not a failure, and the board's
@@ -790,7 +809,9 @@ async function launchCard(
             card.title,
             body,
             resolved.paths,
-            null,
+            // A run in a worktree of its own runs where the card is NOT:
+            // the board reads the root's copy, and the note says so.
+            worktree?.path ?? null,
             resolved.withheld,
             agent.sessionIdDiscovery,
             promptOpts(workspaceId, "action:run-task")
@@ -807,7 +828,7 @@ async function launchCard(
       : composePlanPrompt(
           at,
           resolved.paths,
-          null,
+          worktree?.path ?? null,
           resolved.withheld,
           agent.sessionIdDiscovery,
           promptOpts(workspaceId, "action:run-plan")
@@ -978,7 +999,28 @@ async function launchCard(
   // `launchCwd` and not `cwd`, for the reason runChanges.ts gives: `cwd`
   // follows the session's OSC 7 reports and drifts.
   const cwd =
-    mode === "review" ? (binding?.launchCwd ?? binding?.cwd ?? card.contextFolder) : card.contextFolder;
+    mode === "review"
+      ? (binding?.launchCwd ?? binding?.cwd ?? card.contextFolder)
+      : (worktree?.path ?? card.contextFolder);
+  // The worktree, cut HERE and not earlier: after every gate and the
+  // status write, so a refused, declined or queued launch never leaves a
+  // folder and a branch behind -- the order Best-of-N keeps for the same
+  // reason (bestOfNActions.ts). Its `[worktree] setup` is chained ahead
+  // of the agent on one line, off the store workspace trust hashed: a
+  // fresh checkout has no node_modules and no .env, and an agent started
+  // before them debugs the checkout instead of the card.
+  let line = command;
+  if (worktree) {
+    const forked = await forkWorktree(workspaceId, {
+      path: worktree.path,
+      branch: worktree.branch,
+      from: worktree.from,
+      newBranch: true,
+    });
+    if (!forked.ok) return `Couldn't create the worktree for ${card.title} — ${forked.error}`;
+    const setup = get(worktreeSetups)[workspaceId] ?? [];
+    line = setupPlan(setup, command, configTrustFor(workspaceId).trusted)?.line ?? command;
+  }
   // Before the session exists, because that is the only moment this can
   // be asked: an agent's first minutes move HEAD and dirty the tree.
   //
@@ -1003,11 +1045,14 @@ async function launchCard(
   try {
     sessionId = await backend.createSession(
       cwd,
-      command,
+      line,
       workspaceRootPath(workspaceId) ?? undefined,
       profileIdToSend
     );
   } catch (e) {
+    // Undone, as a half-made best-of-N run is: a worktree nobody is
+    // working in is a folder the human never asked for.
+    if (worktree) await discardWorktrees(workspaceId, [{ path: worktree.path, branch: worktree.branch }], true);
     return `Couldn't start the agent: ${e instanceof Error ? e.message : e}`;
   }
   if (inject) {
@@ -1449,5 +1494,6 @@ export async function launchQueuedCard(intent: CardIntent): Promise<void> {
     automatic: intent.automatic,
     queued: true,
     ...(intent.withoutHeadroom ? { withoutHeadroom: true } : {}),
+    ...(intent.worktree ? { worktree: intent.worktree } : {}),
   });
 }

@@ -13,6 +13,7 @@ import { slugStatus, type CardView } from "$lib/core/planBoard";
 import { sessionLiveness, type WorkspacesData } from "$lib/core/workspace";
 import { count } from "$lib/orchestration/railConfirm";
 import { estimateLines, type LaunchEstimate } from "$lib/agents/launchEstimate";
+import { OWN_WORKTREES_LABEL, checkoutWouldBeShared, sharedCheckoutLines } from "$lib/cards/sharedCheckout";
 
 /// "start" and "run" spawn the ordinary run prompt; "resume" spawns the
 /// gavin-resume one.
@@ -168,6 +169,39 @@ export interface ColumnRunPrompt {
   title: string;
   lines: string[];
   confirmLabel: string;
+  /// The second action, "Each in its own worktree", or null when the
+  /// press would not share a checkout -- or cannot leave it (Resume).
+  worktreeLabel: string | null;
+}
+
+/// The checkout the column's cards would launch into, as the column
+/// header sees it: the titles of the OTHER live sessions already in it
+/// (`liveCheckoutPeers` + `peerTitles` in sharedCheckout.ts). Optional on
+/// the confirm so a test about the column arithmetic need not build one.
+export interface CheckoutShare {
+  peers: string[];
+}
+
+/// A Resume cannot be moved: the agent picks up work that sits in the
+/// checkout it was done in, and a fresh worktree forked from the trunk
+/// has none of it. So it is warned and offered nothing else.
+export const RESUME_STAYS_IN_CHECKOUT =
+  "Resumed agents carry on where their work is, so they cannot be moved to worktrees of their own.";
+
+/// The confirm's checkout lines and its second action, shared by the
+/// column's Run all and the selection bar's Run selected so the two
+/// presses say the same thing about the same checkout.
+export function checkoutShareChoice(
+  share: CheckoutShare | null | undefined,
+  launching: number,
+  canMove: boolean
+): { lines: string[]; worktreeLabel: string | null } {
+  const peers = share?.peers ?? [];
+  if (!share || !checkoutWouldBeShared(peers.length, launching)) return { lines: [], worktreeLabel: null };
+  const lines = sharedCheckoutLines(peers, launching);
+  return canMove
+    ? { lines, worktreeLabel: OWN_WORKTREES_LABEL }
+    : { lines: [...lines, RESUME_STAYS_IN_CHECKOUT], worktreeLabel: null };
 }
 
 export function columnRunAllConfirm(
@@ -177,18 +211,27 @@ export function columnRunAllConfirm(
   /// What this press is projected to cost (launchEstimate.ts). Optional
   /// so a test about the column arithmetic need not build a machine
   /// sample; the column header always passes one.
-  estimate?: LaunchEstimate | null
+  estimate?: LaunchEstimate | null,
+  /// Who already works in the checkout these cards would launch into.
+  /// Absent, the confirm says nothing about the checkout -- the shape
+  /// every caller had before it existed.
+  share?: CheckoutShare | null
 ): ColumnRunPrompt {
   const n = targets.length;
   const verb = runVerb(action.mode);
+  const shared = checkoutShareChoice(share, n, action.mode !== "resume");
   return {
     title: `${verb} ${count(n, "card")} in "${columnName}"?`,
     lines: [
       `${columnRunTip(action, n)}.`,
       `${verb}s: ${targets.map((c) => c.title).join(", ")}.`,
+      // Where they would run, after who: the sentence is about these
+      // cards, and it reads as nothing until they have been named.
+      ...shared.lines,
       // Last: the lines above say who runs, this one says what it takes.
       ...(estimate ? estimateLines(estimate) : []),
     ],
     confirmLabel: `${verb} ${count(n, "card")}`,
+    worktreeLabel: shared.worktreeLabel,
   };
 }

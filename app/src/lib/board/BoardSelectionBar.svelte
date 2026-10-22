@@ -17,6 +17,10 @@
   } from "$lib/board/boardSelection";
   import ConfirmPrompt from "$lib/core/ConfirmPrompt.svelte";
   import { estimateFor, launchGateVerdict } from "$lib/agents/launchQueue";
+  import { gavinTrees } from "$lib/core/gavinState";
+  import { layoutState } from "$lib/core/layoutState";
+  import { cardSessionState } from "$lib/board/columnRunAction";
+  import { checkoutShare } from "$lib/cards/sharedCheckout";
 
   interface Props {
     workspaceId: string;
@@ -25,8 +29,11 @@
     /// is what the bar reports and runs.
     allCards: CardView[];
     onRunCard: (card: CardView) => void | Promise<void>;
+    /// "Each in its own worktree" -- see KanbanColumn's prop of the same
+    /// name. Absent, the confirm offers only the ordinary Run.
+    onRunInOwnWorktrees?: ((cards: CardView[]) => void | Promise<void>) | null;
   }
-  let { workspaceId, allCards, onRunCard }: Props = $props();
+  let { workspaceId, allCards, onRunCard, onRunInOwnWorktrees = null }: Props = $props();
 
   const picked = $derived(selectedCards(allCards, $boardSelection));
   const runnable = $derived(
@@ -34,6 +41,17 @@
   );
 
   let running = $state(false);
+
+  // Who already works in the checkout the selection would launch into
+  // (sharedCheckout.ts) -- the workspace root, where every board Run goes.
+  const share = $derived(
+    checkoutShare(
+      $gavinTrees[workspaceId]?.rootMissing ? null : $gavinTrees[workspaceId]?.rootPath,
+      $kanbanState[workspaceId]?.cardSessions ?? [],
+      (b) => cardSessionState($layoutState, b) === "live",
+      (path) => allCards.find((c) => c.id === path)?.title
+    )
+  );
 
   // Asks first: a selection can span every column on the board, so this
   // is the one press here with no upper bound at all -- and the number
@@ -49,7 +67,7 @@
     // Read so this derivation depends on it; see OrchestrationHubView.
     void $launchGateVerdict;
     if (!runPrompt || runnable.length === 0) return null;
-    return selectionRunConfirm(runnable, estimateFor(workspaceId, runnable.length));
+    return selectionRunConfirm(runnable, estimateFor(workspaceId, runnable.length), share);
   });
 
   async function runSelected(): Promise<void> {
@@ -71,6 +89,20 @@
     clearBoardSelection();
   }
 
+  // The confirm's second action: the same cards, each in a worktree of
+  // its own.
+  async function runSelectedInOwnWorktrees(): Promise<void> {
+    runPrompt = false;
+    if (running || runnable.length === 0 || !onRunInOwnWorktrees) return;
+    running = true;
+    try {
+      await onRunInOwnWorktrees([...runnable]);
+    } finally {
+      running = false;
+    }
+    clearBoardSelection();
+  }
+
   // Esc drops the selection, the same way it cancels a drag. Attached
   // unconditionally: clearing an empty selection is a no-op, and this
   // way the key works wherever the pointer sits on the board.
@@ -87,7 +119,12 @@
   <ConfirmPrompt
     title={runContent.title}
     lines={runContent.lines}
-    choices={[{ label: runContent.confirmLabel, onPick: () => void runSelected() }]}
+    choices={[
+      { label: runContent.confirmLabel, onPick: () => void runSelected() },
+      ...(runContent.worktreeLabel && onRunInOwnWorktrees
+        ? [{ label: runContent.worktreeLabel, onPick: () => void runSelectedInOwnWorktrees() }]
+        : []),
+    ]}
     onCancel={() => (runPrompt = false)}
   />
 {/if}

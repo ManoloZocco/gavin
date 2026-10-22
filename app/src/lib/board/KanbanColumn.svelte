@@ -34,6 +34,8 @@
   import { executeArchive, isDoneColumn } from "$lib/files/archiveActions";
   import { featureBlockedReason } from "$lib/core/daemonCompat";
   import { daemonCompat } from "$lib/core/layoutState";
+  import { gavinTrees } from "$lib/core/gavinState";
+  import { checkoutShare } from "$lib/cards/sharedCheckout";
 
   interface Props {
     workspaceId: string;
@@ -50,6 +52,10 @@
     // that says work on this card already happened. Absent, that column
     // falls back to a plain run.
     onResumeCard?: ((card: CardView) => void | Promise<void>) | null;
+    // "Each in its own worktree" (sharedCheckout.ts): the confirm's
+    // second action when its press would share a checkout. Absent, the
+    // confirm still SAYS the checkout is shared and offers only the one.
+    onRunInOwnWorktrees?: ((cards: CardView[]) => void | Promise<void>) | null;
     onSendToAgent?: ((card: CardView) => void) | null;
     agentAvailable?: boolean;
     onDeleteCard?: ((card: CardView) => void) | null;
@@ -76,6 +82,7 @@
     onOpenPlanCard,
     onRunCard = null,
     onResumeCard = null,
+    onRunInOwnWorktrees = null,
     onSendToAgent = null,
     agentAvailable = false,
     onDeleteCard = null,
@@ -246,6 +253,18 @@
   );
   let runningAll = $state(false);
 
+  // Who already works in the checkout this column's cards launch into:
+  // every board launch runs in the workspace root, so that is the
+  // checkout asked about.
+  const share = $derived(
+    checkoutShare(
+      $gavinTrees[workspaceId]?.rootMissing ? null : $gavinTrees[workspaceId]?.rootPath,
+      $kanbanState[workspaceId]?.cardSessions ?? [],
+      (b) => cardSessionState($layoutState, b) === "live",
+      (path) => allCards.find((c) => c.id === path)?.title
+    )
+  );
+
   // Asks first: a whole column's worth of agent spawns is not something
   // a click should fire outright. Held as a bare flag rather than a
   // captured target list, the same reason the Orchestration tab's own
@@ -265,9 +284,23 @@
       runAction,
       column.name,
       runnable,
-      estimateFor(workspaceId, runnable.length)
+      estimateFor(workspaceId, runnable.length),
+      share
     );
   });
+
+  // The confirm's second action: the same targets, each launched in a
+  // worktree of its own. Never offered for Resume (columnRunAllConfirm).
+  async function runAllInOwnWorktrees(): Promise<void> {
+    runAllPrompt = false;
+    if (runningAll || !onRunInOwnWorktrees) return;
+    runningAll = true;
+    try {
+      await onRunInOwnWorktrees([...runnable]);
+    } finally {
+      runningAll = false;
+    }
+  }
 
   async function runAll(): Promise<void> {
     const action = runAction;
@@ -471,7 +504,12 @@
   <ConfirmPrompt
     title={runAllContent.title}
     lines={runAllContent.lines}
-    choices={[{ label: runAllContent.confirmLabel, onPick: () => void runAll() }]}
+    choices={[
+      { label: runAllContent.confirmLabel, onPick: () => void runAll() },
+      ...(runAllContent.worktreeLabel && onRunInOwnWorktrees
+        ? [{ label: runAllContent.worktreeLabel, onPick: () => void runAllInOwnWorktrees() }]
+        : []),
+    ]}
     onCancel={() => (runAllPrompt = false)}
   />
 {/if}

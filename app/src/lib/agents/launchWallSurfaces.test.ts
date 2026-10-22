@@ -309,7 +309,9 @@ describe("the Run all estimates", () => {
   const SITES: Array<[string, string]> = [
     ["OrchestrationHubView.svelte", "runAllConfirm(orch, estimateFor(workspaceId, runnableRails.length))"],
     ["KanbanColumn.svelte", "estimateFor(workspaceId, runnable.length)"],
-    ["BoardSelectionBar.svelte", "selectionRunConfirm(runnable, estimateFor(workspaceId, runnable.length))"],
+    // `share` after it: the checkout lines (sharedCheckout.ts) ride the
+    // same confirm.
+    ["BoardSelectionBar.svelte", "selectionRunConfirm(runnable, estimateFor(workspaceId, runnable.length), share)"],
   ];
 
   for (const [file, call] of SITES) {

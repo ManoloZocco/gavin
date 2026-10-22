@@ -152,4 +152,27 @@ describe("selectionRunConfirm", () => {
   it("says nothing about memory when no estimate is passed", () => {
     expect(selectionRunConfirm(targets).lines.some((l) => l.includes("GB"))).toBe(false);
   });
+
+  it("offers nothing about the checkout when no share is passed", () => {
+    const content = selectionRunConfirm(targets);
+    expect(content.worktreeLabel).toBeNull();
+    expect(content.lines.some((l) => l.includes("checkout"))).toBe(false);
+  });
+
+  it("warns about a shared checkout and offers worktrees of their own", () => {
+    const content = selectionRunConfirm(targets, null, { peers: ["Refactor auth"] });
+    expect(content.worktreeLabel).toBe("Each in its own worktree");
+    expect(content.lines).toEqual([
+      "Each one starts its own agent, one after another.",
+      "Runs: Fix login, Add tests.",
+      "1 agent already works in this checkout: Refactor auth.",
+      "Started here, 3 agents would edit one checkout at the same time — each sees the others' half-written files, and a commit can sweep them in.",
+    ]);
+  });
+
+  it("leaves a lone card in an empty checkout alone", () => {
+    const content = selectionRunConfirm([card("Only one")], null, { peers: [] });
+    expect(content.worktreeLabel).toBeNull();
+    expect(content.lines).toHaveLength(2);
+  });
 });

@@ -5,6 +5,8 @@ import {
   columnRunTip,
   columnRunMenuLabel,
   columnRunAllConfirm,
+  checkoutShareChoice,
+  RESUME_STAYS_IN_CHECKOUT,
   cardSessionState,
   type CardSessionState,
 } from "$lib/board/columnRunAction";
@@ -249,3 +251,108 @@ describe("columnRunAllConfirm", () => {
     );
   });
 });
+
+// Start all on a To Do column puts every card's agent in the workspace's
+// own checkout. The confirm used to say nothing about that; now it does,
+// and it offers each card a worktree of its own instead.
+describe("columnRunAllConfirm in a shared checkout", () => {
+  const targets = [card("Fix login"), card("Add tests")];
+  const toDo = columnRunAction("To Do")!;
+  const SHARED_2 =
+    "Started here, 2 agents would edit one checkout at the same time — each sees the others' half-written files, and a commit can sweep them in.";
+
+  it("says nothing and offers nothing when no share is passed", () => {
+    const content = columnRunAllConfirm(toDo, "To Do", targets);
+    expect(content.worktreeLabel).toBeNull();
+    expect(content.lines.some((l) => l.includes("checkout"))).toBe(false);
+  });
+
+  it("says nothing for one card in a checkout nobody else is in", () => {
+    const content = columnRunAllConfirm(toDo, "To Do", [card("Only one")], null, { peers: [] });
+    expect(content.worktreeLabel).toBeNull();
+    expect(content.lines).toEqual(["Start 1 unbound card with the workspace agent.", "Starts: Only one."]);
+  });
+
+  it("warns and offers worktrees when the press itself starts two or more", () => {
+    const content = columnRunAllConfirm(toDo, "To Do", targets, null, { peers: [] });
+    expect(content.worktreeLabel).toBe("Each in its own worktree");
+    expect(content.lines).toContain(SHARED_2);
+  });
+
+  it("names the live agents already in the checkout, after the cards", () => {
+    const content = columnRunAllConfirm(toDo, "To Do", [card("Only one")], null, { peers: ["Refactor auth"] });
+    expect(content.lines).toEqual([
+      "Start 1 unbound card with the workspace agent.",
+      "Starts: Only one.",
+      "1 agent already works in this checkout: Refactor auth.",
+      SHARED_2,
+    ]);
+    expect(content.worktreeLabel).toBe("Each in its own worktree");
+  });
+
+  it("offers worktrees to the custom column's Run all too", () => {
+    const content = columnRunAllConfirm(columnRunAction("Blocked")!, "Blocked", targets, null, { peers: [] });
+    expect(content.worktreeLabel).toBe("Each in its own worktree");
+  });
+
+  it("warns a Resume but never offers to move it", () => {
+    const content = columnRunAllConfirm(columnRunAction("In Progress")!, "In Progress", targets, null, {
+      peers: ["Refactor auth"],
+    });
+    expect(content.worktreeLabel).toBeNull();
+    expect(content.lines).toContain("1 agent already works in this checkout: Refactor auth.");
+    expect(content.lines[content.lines.length - 1]).toBe(RESUME_STAYS_IN_CHECKOUT);
+  });
+
+  it("keeps the memory estimate last, after the checkout lines", () => {
+    const content = columnRunAllConfirm(
+      toDo,
+      "To Do",
+      targets,
+      launchEstimate({
+        count: 2,
+        profileId: "claude-code",
+        means: {},
+        storedMeans: {},
+        measuredAgents: 0,
+        sample: {
+          supported: true,
+          totalBytes: 32 * 1024 ** 3,
+          freePercent: 50,
+          pressureLevel: 1,
+          swapUsedBytes: 0,
+          sampledAtMs: 0,
+        },
+        maxInFlight: 1,
+        inFlight: 0,
+      }),
+      { peers: ["Refactor auth"] }
+    );
+    expect(content.lines[2]).toBe("1 agent already works in this checkout: Refactor auth.");
+    expect(content.lines[content.lines.length - 1]).toBe(
+      "2 agents ≈ 3 GB (1.5 GB each) on top of 16 of 32 GB. 1 starts now, 1 queues."
+    );
+  });
+});
+
+describe("checkoutShareChoice", () => {
+  it("is empty without a share or without a shared checkout", () => {
+    expect(checkoutShareChoice(null, 5, true)).toEqual({ lines: [], worktreeLabel: null });
+    expect(checkoutShareChoice(undefined, 5, true)).toEqual({ lines: [], worktreeLabel: null });
+    expect(checkoutShareChoice({ peers: [] }, 1, true)).toEqual({ lines: [], worktreeLabel: null });
+    expect(checkoutShareChoice({ peers: [] }, 0, true)).toEqual({ lines: [], worktreeLabel: null });
+  });
+
+  it("offers the action when the cards can move", () => {
+    expect(checkoutShareChoice({ peers: ["A"] }, 1, true).worktreeLabel).toBe("Each in its own worktree");
+  });
+
+  it("adds the stay-put line instead of the action when the cards cannot move", () => {
+    const choice = checkoutShareChoice({ peers: [] }, 2, false);
+    expect(choice.worktreeLabel).toBeNull();
+    expect(choice.lines).toEqual([SHARED_LINE_2, RESUME_STAYS_IN_CHECKOUT]);
+  });
+});
+
+const SHARED_LINE_2 =
+  "Started here, 2 agents would edit one checkout at the same time — each sees the others' half-written files, and a commit can sweep them in.";
