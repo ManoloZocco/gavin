@@ -45,6 +45,7 @@
     type ListKind,
   } from "$lib/agents/agentPrimary";
   import type { AgentsHubScope } from "$lib/agents/agentsHub";
+  import { emptyComplexityNote } from "$lib/agents/effectiveConfig";
   import type { AgentProfileInfo } from "$lib/core/settings";
   import ComplexityTable from "$lib/cards/ComplexityTable.svelte";
   import FallbackChainEditor from "$lib/workspace/FallbackChainEditor.svelte";
@@ -106,6 +107,11 @@
   }
 
   // ---- complexity ------------------------------------------------------
+
+  /// The tables ship empty, and the agent rating cards is told the human
+  /// maps the levels -- so an empty one has to say that ratings do
+  /// nothing yet, or the rating reads as if it routed something.
+  const emptyTableNote = $derived(emptyComplexityNote(view.table, label));
 
   function setComplexity(level: Complexity, entry: ComplexityAgent | null): void {
     const next = { ...view.table };
@@ -207,6 +213,9 @@
   <ComplexityTable {profiles} table={view.table} onChange={setComplexity} />
 {:else}
   <ComplexityTable {profiles} table={view.appTable} readonly onChange={setComplexity} />
+{/if}
+{#if emptyTableNote}
+  <p class="hint">{emptyTableNote}</p>
 {/if}
 
 <h3 class="sub">Pause</h3>

@@ -83,6 +83,7 @@ import {
   type CustomProfile,
 } from "$lib/cards/complexity";
 import { cardAgentEntry, type CardAgentFields } from "$lib/cards/cardAgent";
+import type { EffectiveConfigInput } from "$lib/agents/effectiveConfig";
 import {
   configTrusted,
   executionKeys,
@@ -2790,6 +2791,25 @@ export const cardAgents = derived(
         agent,
         effectiveListForPrimary(ws?.extraCliArgs, $defaults.extraCliArgs, agent.profileId)
       );
+    }
+);
+
+/// What `effectiveConfig.ts` resolves, gathered from the same stores
+/// `cardAgents` reads: `$effectiveConfigInputs(workspaceId)`. A store of
+/// a function for `cardAgents`' reason -- the profile table and the
+/// defaults arrive after mount, and a modal must follow them.
+export const effectiveConfigInputs = derived(
+  [trustedAgentConfigs, layoutState, agentProfilesStore, agentModelDefaultsStore, agentDefaultsStore],
+  ([$configs, $layout, $profiles, $models, $defaults]) =>
+    (workspaceId: string): EffectiveConfigInput => {
+      const ws = $layout.workspaces.find((w) => w.id === workspaceId) ?? null;
+      return {
+        agentConfig: $configs(workspaceId),
+        profiles: mergeAgentProfiles($profiles, $defaults.customProfiles ?? [], ws?.customProfiles ?? []),
+        globalModels: $models,
+        defaults: $defaults,
+        workspace: ws,
+      };
     }
 );
 

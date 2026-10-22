@@ -20,6 +20,7 @@
     workspaceRootPath,
     openFileInSplit,
     resolvedAgents,
+    effectiveConfigInputs,
     liveSessionIds,
     agentDefaultsStore,
     agentProfilesStore,
@@ -36,6 +37,7 @@
   } from "$lib/cards/complexity";
   import CardAgentControls from "$lib/cards/CardAgentControls.svelte";
   import { cardAgentSummary } from "$lib/cards/cardAgent";
+  import { effectiveRunForCard, runsOnBreakdown, runsOnLine } from "$lib/agents/effectiveConfig";
   import {
     addAttachment,
     attachmentChipLabel,
@@ -475,6 +477,14 @@
       effectiveTable,
       (id) => $agentProfilesStore.find((p) => p.id === id)?.label ?? id
     )
+  );
+  /// The resolved answer under it, with the layer that decided it: the
+  /// sentence above explains a level or an override, and says nothing at
+  /// all for the ordinary card, which still runs on SOMETHING the human
+  /// had to work out from four settings pages. Task cards only -- a Run
+  /// launches a task as itself, while a plan's work is its children's.
+  const runsOn = $derived(
+    card.kind === "task" ? effectiveRunForCard($effectiveConfigInputs(workspaceId), agentFields) : null
   );
 
   const activeLabelSlugs = $derived(new Set(card.labels.map(slugStatus)));
@@ -1413,6 +1423,9 @@
         <p class="warning">{complexityBlocked ?? cardAgentBlocked}</p>
       {:else if cardAgentLine}
         <p class="agent-line">{cardAgentLine}</p>
+      {/if}
+      {#if runsOn}
+        <p class="agent-line" title={runsOnBreakdown(runsOn)}>{runsOnLine(runsOn)}</p>
       {/if}
       {#if card.parseWarning}
         <p class="warning">This card's frontmatter has issues — some fields may not be readable.</p>

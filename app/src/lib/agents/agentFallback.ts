@@ -25,6 +25,7 @@
 import type { AgentUsageReport } from "$lib/agents/agentUsage";
 import { usageBlock, usageForLaunchGate } from "$lib/agents/agentUsage";
 import type { FallbackChainsByPrimary } from "$lib/cards/complexity";
+import { DEFAULT_CYCLE, type PauseCycle } from "$lib/agents/agentPause";
 
 /// Ordered profile ids. Empty means no fallback (pause-only).
 export type FallbackChain = string[];
@@ -134,6 +135,28 @@ export function fallbackThresholdFor(
 export function sanitizeFallbackThreshold(n: number): number {
   if (!Number.isFinite(n)) return DEFAULT_FALLBACK_THRESHOLD;
   return Math.min(100, Math.max(1, Math.round(n)));
+}
+
+/// Whether a launch on a primary is limit-gated at all, and the percent
+/// its pause cycle holds a RESUME at, from that primary's effective cycle
+/// and chain.
+///
+/// No cycle at all means limits are off for an install that configured
+/// nothing, so inventing `DEFAULT_CYCLE.limitEnabled` for everyone would
+/// start pausing installs that never asked for a pause. A configured
+/// fallback chain is asking: Settings draws the shipped default (limits
+/// on) for a primary nobody ever saved a cycle for, and a chain that
+/// never walks because that cycle was never persisted left Claude
+/// spawning over the threshold. Shared by `launchDecision` and the
+/// effective-config view, so the two cannot disagree about the gate.
+export function launchLimitGate(
+  cycle: Pick<PauseCycle, "limitEnabled" | "limitPercent"> | null | undefined,
+  chain: readonly string[]
+): { limitEnabled: boolean; limitPercent: number } {
+  return {
+    limitEnabled: cycle ? cycle.limitEnabled : chain.length > 0,
+    limitPercent: cycle?.limitPercent ?? DEFAULT_CYCLE.limitPercent,
+  };
 }
 
 /// An agent with no probe, a failed probe, or limits disabled is never

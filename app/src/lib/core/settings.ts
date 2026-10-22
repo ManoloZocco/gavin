@@ -520,6 +520,74 @@ export function isLeftoverCommand(
 /// defaultAgent`) is empty or names nothing installed.
 export const FALLBACK_PROFILE = "claude-code";
 
+/// Which of `resolveAgentConfig`'s inputs supplied a value: the config it
+/// was handed, the app-wide default (default agent, per-profile model or
+/// effort), the hard-coded `claude-code`, or nothing -- the agent's own
+/// default. "config" is one layer here because this function cannot
+/// tell a workspace's `[agent]` block from a complexity row or a card
+/// laid over it; `effectiveConfig.ts` splits it.
+export type AgentInputLayer = "config" | "app" | "builtin" | "unset";
+
+/// The four "what runs" answers of a resolve, each with the input that
+/// gave it, plus the profile rows the rest of the resolve reads from.
+export interface AgentChoice {
+  profileId: string;
+  model: string;
+  effort: string;
+  advisor: string;
+  layers: Record<"profile" | "model" | "effort" | "advisor", AgentInputLayer>;
+  /// The row `profileId` names, or undefined while the table is empty.
+  effective: AgentProfileInfo | undefined;
+  /// The row a missing or unknown profile falls back to.
+  fallback: AgentProfileInfo | undefined;
+}
+
+/// The precedence `resolveAgentConfig` applies to profile, model, effort
+/// and advisor, said once and with its layers, so a surface that has to
+/// say WHERE a value came from reads the same rule the launcher runs on
+/// instead of a copy of it. `resolveAgentConfig` is built on this.
+export function resolveAgentChoice(
+  config: AgentConfig | null | undefined,
+  profiles: AgentProfileInfo[],
+  globalModels: Record<string, string>,
+  globalEfforts: Record<string, string> = {},
+  appDefaultProfile: string = ""
+): AgentChoice {
+  const appDefault = nonEmpty(appDefaultProfile);
+  const defaultId = appDefault ?? FALLBACK_PROFILE;
+  const requestedOwn = nonEmpty(config?.profile);
+  const profile = profiles.find((p) => p.id === (requestedOwn ?? defaultId));
+  const fallback = profiles.find((p) => p.id === defaultId) ?? profiles.find((p) => p.id === FALLBACK_PROFILE);
+  const effective = profile ?? fallback;
+  const profileId = effective?.id ?? defaultId;
+  // A config naming a profile the table does not have fell through to
+  // the default, so the default is what supplied it.
+  const profileLayer: AgentInputLayer =
+    requestedOwn && profile ? "config" : appDefault && profileId === appDefault ? "app" : "builtin";
+  // Keyed by the RESOLVED profile, not the requested one: a config
+  // naming a profile that no longer exists runs claude-code, so it must
+  // inherit claude-code's default rather than a dead row's.
+  const ownModel = nonEmpty(config?.model);
+  const appModel = nonEmpty(globalModels[profileId]);
+  const ownEffort = nonEmpty(config?.effort);
+  const appEffort = nonEmpty(globalEfforts[profileId]);
+  const ownAdvisor = nonEmpty(config?.advisor);
+  return {
+    profileId,
+    model: ownModel ?? appModel ?? "",
+    effort: ownEffort ?? appEffort ?? "",
+    advisor: ownAdvisor ?? "",
+    layers: {
+      profile: profileLayer,
+      model: ownModel ? "config" : appModel ? "app" : "unset",
+      effort: ownEffort ? "config" : appEffort ? "app" : "unset",
+      advisor: ownAdvisor ? "config" : "unset",
+    },
+    effective,
+    fallback,
+  };
+}
+
 /// Explicit config beats the profile default beats the app-wide default
 /// agent (empty → claude-code; spec §4.2). Expressed once so the panel,
 /// the hub label, the home tile and the agent-file view can never disagree.
@@ -557,24 +625,16 @@ export function resolveAgentConfig(
   /// scanned. Non-cursor profiles ignore it.
   cursorMcp?: CursorMcpForeignInput
 ): ResolvedAgent {
-  const defaultId = nonEmpty(appDefaultProfile) ?? FALLBACK_PROFILE;
-  const requested = nonEmpty(config?.profile) ?? defaultId;
+  const choice = resolveAgentChoice(config, profiles, globalModels, globalEfforts, appDefaultProfile);
+  const { effective, fallback, profileId, model, effort, advisor } = choice;
   const configured = nonEmpty(config?.mcpFile);
   const customMcpFile = configured && !validateMcpConfigPath(configured) ? configured : null;
-  const profile = profiles.find((p) => p.id === requested);
-  const fallback = profiles.find((p) => p.id === defaultId) ?? profiles.find((p) => p.id === FALLBACK_PROFILE);
-  const effective = profile ?? fallback;
-  const profileId = effective?.id ?? defaultId;
   const explicitCommand = nonEmpty(config?.command);
   const command =
     (explicitCommand && !isLeftoverCommand(explicitCommand, effective, profiles) ? explicitCommand : null) ??
     nonEmpty(effective?.command) ??
     nonEmpty(fallback?.command) ??
     "claude";
-  // Keyed by the RESOLVED profile, not the requested one: a config
-  // naming a profile that no longer exists runs claude-code, so it must
-  // inherit claude-code's default rather than a dead row's.
-  const model = nonEmpty(config?.model) ?? nonEmpty(globalModels[profileId]) ?? "";
   // Workspace flag, then the (possibly custom) profile entry's flag.
   // A workspace flag wins even on a stock profile -- it is the more
   // specific statement, exactly as an overridden `command` is.
@@ -582,14 +642,12 @@ export function resolveAgentConfig(
     nonEmpty(config?.modelFlag) ??
     nonEmpty(effective?.modelFlag) ??
     "";
-  const effort = nonEmpty(config?.effort) ?? nonEmpty(globalEfforts[profileId]) ?? "";
   const effortFlag =
     nonEmpty(config?.effortFlag) ??
     nonEmpty(effective?.effortFlag) ??
     "";
   // No fallback chain: the flag describes the BINARY, the posture
   // `headlessArgs` takes, so a custom agent never inherits claude's.
-  const advisor = nonEmpty(config?.advisor) ?? "";
   const advisorFlag = effective?.advisorFlag ?? "";
   const resolved: ResolvedAgent = {
     profileId,
