@@ -127,11 +127,12 @@ On first run (or whenever there's no saved session) it auto-spawns
 `gavin-daemon` if one isn't already running — you don't need to start the
 daemon separately for normal development.
 
-**Auto-spawn only works in dev mode**, where the daemon binary is a sibling
-of the app's own binary in the same `cargo build` output — there's no
-production "sidecar" bundling yet. If you see a "couldn't connect to the
-daemon" error, run `cargo build -p gavin-daemon` first so the sibling binary
-exists.
+**Auto-spawn needs the daemon binary beside the app's own binary.** In dev
+mode that is the same `cargo build` output; a bundled app carries
+`gavin-daemon`, `gavin-mcp` and `gavin-relay` as sidecars
+(`app/src-tauri/tauri.bundle.conf.json`). If a dev run shows "couldn't
+connect to the daemon", run `node app/src-tauri/dev-sidecars.mjs` (or
+`cargo build -p gavin-daemon`) first so the sibling binary exists.
 
 ### The sidecars are built by a script, not a bare `cargo build`
 

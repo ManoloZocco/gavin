@@ -33,8 +33,10 @@ Settled decisions. Breaking one needs a new decision, not a patch.
 
 ## Architecture
 
-- `crates/protocol` — wire types, `PROTOCOL_VERSION` (41), `MIN_COMPATIBLE_VERSION`
-  (5) and `min_version_for`: the supported daemon window.
+- `crates/protocol` — wire types, `PROTOCOL_VERSION`, `MIN_COMPATIBLE_VERSION`
+  and `min_version_for`: the supported daemon window. The numbers live in
+  `crates/protocol/src/lib.rs` and are not repeated here: this line said 41
+  while the code was at 78.
 - `crates/daemon` — `gavin-daemon`: PTYs, SQLite registry, the `.gavin*` filesystem
   watcher, orchestration state. Newline-delimited JSON over a Unix socket on
   macOS and Linux, and over a Windows named pipe (`\\.\pipe\gavin-…`, named
@@ -111,6 +113,11 @@ items had shipped.
    make the command machine-independent. Alongside it, `gavin-mcp` still fails
    closed when the daemon is newer, so a rebuild takes the tools down in every
    running session until each one restarts; the spec asks for a self re-exec.
+   *Status 2026-10-22:* both have shipped. The committed configs name
+   `scripts/gavin-mcp`, which resolves the binary per machine, and gavin-mcp
+   re-execs itself once against a newer daemon (archived card
+   `gavin-mcp-self-reexec-when-daemon-newer.md`). What is left is that a dead
+   integration still gives no sign in the app: card `lc-01`.
 2. **Close the Windows port.** The code has landed and CI builds it; what is left
    is a desktop pass in front of the running app and four fixes an agent can
    make — `gavin::tests` 10 red, four Rust baseline reds that keep `cargo test`
@@ -129,7 +136,10 @@ items had shipped.
    it in one place.
 5. **The Companion.** Remote access phases 1 and 2 have landed: client identity
    on the local socket, plus the trust store, the pairing handshake, revocation
-   and the Settings section (`PROTOCOL_VERSION` 42). No transport exists yet.
+   and the Settings section. *Status 2026-10-22:* the transport has landed
+   since (`crates/gavin-relay`, the direct listener of ADR 0009, the
+   Companion shell in `app/companion-shell`); see the README's Companion
+   section for what ships.
    What comes next is a phone app for iOS and Android that pairs with each
    Workstation and reaches it through a Relay. One Unlock gives it full control
    of the running desktop app: everything except managing Devices. The spec is
