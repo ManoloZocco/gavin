@@ -93,6 +93,8 @@
   import * as backend from "$lib/core/backend";
   import AgentSkillsControls from "$lib/agents/AgentSkillsControls.svelte";
   import ConfigTrustNotice from "$lib/workspace/ConfigTrustNotice.svelte";
+  import WorktreeSetupPanel from "$lib/workspace/WorktreeSetupPanel.svelte";
+  import { sshLimitation } from "$lib/workspace/sshWorkspace";
   import WorkspaceRootControl from "$lib/workspace/WorkspaceRootControl.svelte";
   import ColourPicker from "$lib/core/ColourPicker.svelte";
   import SearchInput from "$lib/ui/SearchInput.svelte";
@@ -305,7 +307,10 @@
       id: "cards",
       keywords: ["Cards", "Auto commit", "auto-commit", "commit", "Require review", "review"],
     },
-    { id: "git", keywords: ["Git", "Track", "tracking", "gitignore", "repository"] },
+    {
+      id: "git",
+      keywords: ["Git", "Track", "tracking", "gitignore", "repository", "Worktree setup", "worktree", "lockfile", "install"],
+    },
     AGENTS_SECTION,
     {
       id: "headroom",
@@ -972,6 +977,11 @@
         <p class="hint">{trackingSummary(tracking)}</p>
         {#if trackingError}
           <p class="hint error">{trackingError}</p>
+        {/if}
+        {#if sshLimitation(ws)}
+          <p class="hint">{sshLimitation(ws)}</p>
+        {:else if ws?.rootPath}
+          <WorktreeSetupPanel {workspaceId} rootPath={ws.rootPath} active={selectedSection === "git"} />
         {/if}
       {/if}
     </section>
