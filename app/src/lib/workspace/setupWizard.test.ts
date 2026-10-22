@@ -8,6 +8,9 @@ import {
   playwrightStepSettled,
   PRD_PLACEHOLDERS,
   SETUP_STEPS,
+  SETUP_STEP_LABELS,
+  NAGGED_STEPS,
+  setupBannerText,
 } from "$lib/workspace/setupWizard";
 import type { AgentSkillsStatus } from "$lib/agents/agentSkills";
 import type { HeadroomStatus } from "$lib/agents/compression";
@@ -221,6 +224,25 @@ describe("setupProgress", () => {
     expect(setupProgress({ ...ALL_DONE, hasRoot: false }).configured).toBe(false);
   });
 
+  // The banner used to say "N of 10" while `configured` ignored five of
+  // the ten, so "5 of 10 done" could mean nothing was left. It counts the
+  // steps that gate `configured` now, and names the ones still missing.
+  it("counts and names only the steps `configured` waits on", () => {
+    expect(NAGGED_STEPS).toEqual(["agent", "integration", "agentSkills", "playwright", "prd"]);
+    expect(setupProgress(ALL_DONE).missing).toEqual([]);
+    expect(setupProgress({ ...ALL_DONE, hasRoot: false }).missing).toEqual(NAGGED_STEPS);
+    const p = setupProgress({ ...ALL_DONE, configCommand: null, prdBody: TEMPLATE });
+    expect(p.missing).toEqual(["agent", "prd"]);
+    expect(setupBannerText(p)).toBe("3 of 5 done — still to do: Agent, PRD");
+  });
+
+  it("keeps `missing` and `configured` the same answer", () => {
+    for (const input of [ALL_DONE, NOTHING_DONE, { ...ALL_DONE, prdBody: TEMPLATE }]) {
+      const p = setupProgress(input);
+      expect(p.configured).toBe(p.missing.length === 0);
+    }
+  });
+
   // Which field the banner reads IS the fix: `complete` puts a live
   // process in the condition, so Stop on the home agent panel -- or the
   // agent simply exiting -- re-raised a finished workspace's setup nag.
@@ -377,16 +399,16 @@ describe("setupProgress", () => {
   // `next` disagree about where Headroom is.
   it("draws the wizard's stepper from the same steps, Headroom included", () => {
     const wizard = SOURCES["SetupWizard.svelte"];
-    const ids = [...wizard.matchAll(/\{ id: "([a-zA-Z]+)", label: "[^"]+" \}/g)].map((m) => m[1]);
-    expect(ids).toEqual(SETUP_STEPS);
+    expect(wizard).toContain("SETUP_STEPS.map((id) => ({");
+    expect(Object.keys(SETUP_STEP_LABELS)).toEqual(SETUP_STEPS);
     expect(wizard).toContain('current === "headroom"');
     expect(wizard).toContain("headroomAsked: Boolean(ws?.headroomAsked)");
     const home = SOURCES["HomeHubView.svelte"];
-    expect(home).toContain("{SETUP_STEPS.length}");
+    expect(home).toContain("{setupBannerText(setup)}");
     expect(home).toContain("headroomAsked: Boolean(ws?.headroomAsked)");
     expect(home).toContain("headroomReading: headroom,");
     // And the Memory step, named on both surfaces.
-    expect(wizard).toContain('{ id: "memory", label: "Memory" }');
+    expect(SETUP_STEP_LABELS.memory).toBe("Memory");
     expect(wizard).toContain('current === "memory"');
     expect(wizard).toContain("<MemoryStep");
     expect(wizard).toContain("memoryReading: memory,");
@@ -394,7 +416,7 @@ describe("setupProgress", () => {
     expect(home).toContain("memoryReading: memory,");
     expect(home).toContain("memorySkipped,");
     // And Playwright's, on both.
-    expect(wizard).toContain('{ id: "playwright", label: "Playwright" }');
+    expect(SETUP_STEP_LABELS.playwright).toBe("Playwright");
     expect(wizard).toContain('current === "playwright"');
     expect(wizard).toContain("<PlaywrightStep");
     for (const src of [wizard, home]) {

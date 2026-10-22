@@ -51,6 +51,10 @@ export interface SetupProgress {
   /// banner is how it is asked, and "not now" is an answer that ends it --
   /// so it nags until answered, never for ever.
   configured: boolean;
+  /// The steps `configured` is waiting on, in wizard order: what the Home
+  /// banner names, so "3 of 5 done" never leaves the reader to guess which
+  /// two are left. Empty exactly when `configured` is true.
+  missing: SetupStep[];
   /// True while an input the derivation needs has not been read yet.
   /// Every other field then describes only the evidence seen so far and
   /// must not be acted on: a caller that renders "setup unfinished"
@@ -190,6 +194,37 @@ export const SETUP_STEPS: SetupStep[] = [
 
 const ORDER: SetupStep[] = SETUP_STEPS;
 
+/// The steps outside the nag -- see `configured` for why each one is.
+const UNNAGGED: SetupStep[] = ["launch", "git", "review", "headroom", "memory"];
+
+/// The steps a workspace counts as set up by, in wizard order. The Home
+/// banner counts THESE: it used to read "N of 10" off SETUP_STEPS while
+/// `configured` ignored five of the ten, so "5 of 10 done" could mean
+/// nothing was left at all.
+export const NAGGED_STEPS: SetupStep[] = SETUP_STEPS.filter((s) => !UNNAGGED.includes(s));
+
+/// What each step is called, on the wizard's stepper and in the banner.
+export const SETUP_STEP_LABELS: Record<SetupStep, string> = {
+  agent: "Agent",
+  integration: "Integration",
+  agentSkills: "Matt Pocock's skills",
+  headroom: "Headroom",
+  memory: "Memory",
+  playwright: "Playwright",
+  git: "Git",
+  review: "Review",
+  prd: "PRD",
+  launch: "Launch",
+};
+
+/// The Home banner's line: how many of the steps that matter are done,
+/// and which are left, by name.
+export function setupBannerText(progress: SetupProgress): string {
+  const done = NAGGED_STEPS.length - progress.missing.length;
+  const left = progress.missing.map((s) => SETUP_STEP_LABELS[s]).join(", ");
+  return `${done} of ${NAGGED_STEPS.length} done — still to do: ${left}`;
+}
+
 /// Derived, never stored (W1): a step configured by hand -- or by an
 /// agent -- counts the moment its evidence lands on disk, so no progress
 /// record can disagree with reality.
@@ -198,7 +233,14 @@ export function setupProgress(input: SetupInput): SetupProgress {
     // Every later step writes under the root, so without one nothing can
     // be done yet -- whatever else happens to be true. Settled, not
     // pending: no pending read could change this answer.
-    return { done: [], next: "agent", complete: false, configured: false, pending: false };
+    return {
+      done: [],
+      next: "agent",
+      complete: false,
+      configured: false,
+      missing: [...NAGGED_STEPS],
+      pending: false,
+    };
   }
   const done: SetupStep[] = [];
   if (input.configCommand?.trim()) done.push("agent");
@@ -257,16 +299,9 @@ export function setupProgress(input: SetupInput): SetupProgress {
   // is left is what the Home banner is allowed to read; `complete` still
   // means all of them, which is what the wizard opens on. Playwright is
   // not on the list: it is the catch-up `configured` describes.
-  const configured = ORDER.every(
-    (s) =>
-      s === "launch" ||
-      s === "git" ||
-      s === "review" ||
-      s === "headroom" ||
-      s === "memory" ||
-      done.includes(s)
-  );
-  return { done: ordered, next, complete: next === null, configured, pending };
+  const missing = NAGGED_STEPS.filter((s) => !done.includes(s));
+  const configured = missing.length === 0;
+  return { done: ordered, next, complete: next === null, configured, missing, pending };
 }
 
 export interface PrdSections {

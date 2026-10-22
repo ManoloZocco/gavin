@@ -10,7 +10,12 @@
   import { gavinTrees } from "$lib/core/gavinState";
   import { resolveAgentConfig, resolvePrdPath } from "$lib/core/settings";
   import { sshLimitation } from "$lib/workspace/sshWorkspace";
-  import { setupProgress, type SetupStep } from "$lib/workspace/setupWizard";
+  import {
+    setupProgress,
+    SETUP_STEPS,
+    SETUP_STEP_LABELS,
+    type SetupStep,
+  } from "$lib/workspace/setupWizard";
   import { UNKNOWN_STATUS, type AgentSkillsMark, type AgentSkillsStatus } from "$lib/agents/agentSkills";
   import { workspaceHeadroomReading } from "$lib/agents/headroomSetup";
   import { ensureHeadroomReading, headroomReading } from "$lib/agents/headroomState";
@@ -40,18 +45,10 @@
   }
   let { workspaceId }: Props = $props();
 
-  const STEPS: Array<{ id: SetupStep; label: string }> = [
-    { id: "agent", label: "Agent" },
-    { id: "integration", label: "Integration" },
-    { id: "agentSkills", label: "Matt Pocock's skills" },
-    { id: "headroom", label: "Headroom" },
-    { id: "memory", label: "Memory" },
-    { id: "playwright", label: "Playwright" },
-    { id: "git", label: "Git" },
-    { id: "review", label: "Review" },
-    { id: "prd", label: "PRD" },
-    { id: "launch", label: "Launch" },
-  ];
+  const STEPS: Array<{ id: SetupStep; label: string }> = SETUP_STEPS.map((id) => ({
+    id,
+    label: SETUP_STEP_LABELS[id],
+  }));
 
   const ws = $derived($layoutState.workspaces.find((w) => w.id === workspaceId) ?? null);
   const sshBlocked = $derived(sshLimitation(ws));

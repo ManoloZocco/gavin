@@ -12,7 +12,7 @@
     wizardWorkspaceId,
   } from "$lib/core/layoutState";
   import { resolveAgentConfig, resolvePrdPath } from "$lib/core/settings";
-  import { setupProgress, SETUP_STEPS } from "$lib/workspace/setupWizard";
+  import { setupBannerText, setupProgress } from "$lib/workspace/setupWizard";
   import { UNKNOWN_STATUS, type AgentSkillsMark, type AgentSkillsStatus } from "$lib/agents/agentSkills";
   import { workspaceHeadroomReading } from "$lib/agents/headroomSetup";
   import { ensureHeadroomReading, headroomReading } from "$lib/agents/headroomState";
@@ -399,7 +399,7 @@
     {#if root && !setup.pending && !setup.configured}
       <button type="button" class="setup-card" onclick={() => openWizard(workspaceId)}>
         <b>Finish setting up this workspace</b>
-        <span>{setup.done.length} of {SETUP_STEPS.length} done — continue</span>
+        <span>{setupBannerText(setup)} — continue</span>
       </button>
     {/if}
     <!-- Home is where the workspace's own agent launches, and it is the
