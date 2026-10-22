@@ -578,4 +578,12 @@ describe("lintIndex / cardWarningText", () => {
     expect(cardWarningText([], true)).toBe(PARSE_WARNING_TEXT);
     expect(cardWarningText([], false)).toBeNull();
   });
+
+  // The daemon names the field now; its reasons replace the generic
+  // sentence, which could only guess which field it was.
+  it("prefers the daemon's per-field reasons to the generic sentence", () => {
+    const why = ["priority: `hgih` is not none, low, medium, high or urgent"];
+    expect(cardWarningText([], true, why)).toBe(why[0]);
+    expect(cardWarningText([], true, [])).toBe(PARSE_WARNING_TEXT);
+  });
 });

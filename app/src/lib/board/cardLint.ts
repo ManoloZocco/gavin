@@ -687,9 +687,16 @@ export function findingsForCard(
 /// The ⚠ chip's tooltip: every finding, one per line, and the daemon's
 /// bare parse warning when it is set. Null when there is nothing to say,
 /// which is what hides the chip.
-export function cardWarningText(findings: readonly LintFinding[], parseWarning: boolean): string | null {
+export function cardWarningText(
+  findings: readonly LintFinding[],
+  parseWarning: boolean,
+  /// The daemon's own per-field reasons. When it sent them they replace
+  /// the generic sentence, which only guesses at which field it was.
+  parseWarnings: readonly string[] = []
+): string | null {
   const lines = findings.map((f) => f.message);
-  if (parseWarning) lines.push(PARSE_WARNING_TEXT);
+  if (parseWarnings.length > 0) lines.push(...parseWarnings);
+  else if (parseWarning) lines.push(PARSE_WARNING_TEXT);
   return lines.length > 0 ? lines.join("\n") : null;
 }
 

@@ -236,7 +236,7 @@
   // where the chip used to say only "frontmatter has issues". Empty off a
   // workspace (the drag preview), which leaves the daemon's bare flag.
   const findings = $derived(workspaceId === null ? [] : ($cardLint[workspaceId]?.byPath.get(card.id) ?? []));
-  const warningText = $derived(cardWarningText(findings, card.parseWarning));
+  const warningText = $derived(cardWarningText(findings, card.parseWarning, card.parseWarnings));
 
   // Deduped by name: frontmatter may list the same label twice, and a
   // keyed each on name would then throw each_key_duplicate.

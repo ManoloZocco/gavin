@@ -1435,7 +1435,11 @@
       {#each lintFindings as finding (finding.code + finding.message)}
         <p class="warning">{finding.message}</p>
       {/each}
-      {#if card.parseWarning}
+      {#if card.parseWarnings?.length}
+        {#each card.parseWarnings as why (why)}
+          <p class="warning">{why}</p>
+        {/each}
+      {:else if card.parseWarning}
         <p class="warning">{PARSE_WARNING_TEXT}</p>
       {/if}
       <!-- A queued launch. Above the session bar rather than in it: the
