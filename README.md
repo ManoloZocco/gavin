@@ -249,6 +249,10 @@ The release notes name the commit and build number each one came from.
 There is no auto-update for a Preview build: download it again for a
 newer one.
 
+First time in the app? [`docs/guida-gavin.md`](docs/guida-gavin.md) (in
+Italian) walks from the first launch to a small project three agents
+build in parallel on their own rails.
+
 ### Build from source
 
 The install scripts build a release from `main`'s tip in a worktree of
