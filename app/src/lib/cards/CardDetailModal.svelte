@@ -133,6 +133,8 @@
     type CardSituation,
   } from "$lib/cards/cardDetail";
   import * as backend from "$lib/core/backend";
+  import { findingsForCard, parentBrokenShort, PARSE_WARNING_TEXT } from "$lib/board/cardLint";
+  import { cardLint } from "$lib/board/cardLintState";
 
   interface Props {
     card: CardView;
@@ -385,6 +387,9 @@
   }
 
   const nested = $derived(card.parent !== null && card.status === null && !card.parentBroken);
+  // The linter's findings for this card, plus the one rule the tree
+  // cannot answer and this modal can: it has read the body.
+  const lintFindings = $derived(findingsForCard($cardLint[workspaceId], card, content));
   const statusMatchesColumn = $derived(
     card.status !== null && columns.some((c) => slugStatus(c.name) === slugStatus(card.status ?? ""))
   );
@@ -1413,7 +1418,7 @@
               </button>
             {:else}
               <span class:broken={card.parentBroken}
-                >{card.parentBroken ? `⚠ ${card.parent} (not found)` : card.parentTitle}</span
+                >{card.parentBroken ? `⚠ ${card.parent} (${parentBrokenShort(lintFindings)})` : card.parentTitle}</span
               >
             {/if}
           </div>
@@ -1427,8 +1432,11 @@
       {#if runsOn}
         <p class="agent-line" title={runsOnBreakdown(runsOn)}>{runsOnLine(runsOn)}</p>
       {/if}
+      {#each lintFindings as finding (finding.code + finding.message)}
+        <p class="warning">{finding.message}</p>
+      {/each}
       {#if card.parseWarning}
-        <p class="warning">This card's frontmatter has issues — some fields may not be readable.</p>
+        <p class="warning">{PARSE_WARNING_TEXT}</p>
       {/if}
       <!-- A queued launch. Above the session bar rather than in it: the
            bar reports a SESSION, and the whole point of this state is

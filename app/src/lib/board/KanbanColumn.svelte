@@ -19,7 +19,9 @@
     cardSessionState,
     type CardSessionState,
   } from "$lib/board/columnRunAction";
-  import { Play, RotateCcw, Archive } from "@lucide/svelte";
+  import { Play, RotateCcw, Archive, TriangleAlert } from "@lucide/svelte";
+  import { cardWarningText } from "$lib/board/cardLint";
+  import { cardLint } from "$lib/board/cardLintState";
   import IconButton from "$lib/ui/IconButton.svelte";
   import { X } from "@lucide/svelte";
   import { formatShortcut } from "$lib/core/shortcuts";
@@ -133,6 +135,10 @@
   // permanent), but freely reorderable like any other column. Their X
   // CLEARS instead -- the column stays, its cards go.
   const permanent = $derived(isPermanentColumn(column.name));
+  // The card linter's board-scoped findings for this column: today only
+  // a column right of Done, which splits the rails' done from the
+  // daemon's.
+  const columnWarning = $derived(cardWarningText($cardLint[workspaceId]?.byColumn.get(column.id) ?? [], false));
 
   let columnPrompt = $state<"delete" | "clear" | null>(null);
   let deleteError = $state<string | null>(null);
@@ -373,6 +379,9 @@
       <button type="button" class="name" onclick={startRename} use:tooltip={"Rename column — its name is the status vocabulary"}>{column.name}</button>
       <span class="count" class:filtered use:tooltip={countTip}>{countText}</span>
     {/if}
+    {#if columnWarning}
+      <span class="column-warning" use:tooltip={columnWarning}><TriangleAlert size={12} /></span>
+    {/if}
     {#if runAction && runnable.length > 0}
       <!-- The reason rides the wrapper, not the button: IconButton binds
            its tooltip to the <button>, and a disabled element never
@@ -588,6 +597,12 @@
   }
   .count.filtered {
     color: var(--accent-text);
+  }
+  .column-warning {
+    display: inline-flex;
+    align-items: center;
+    flex: 0 0 auto;
+    color: var(--warning-text);
   }
   .no-match {
     color: var(--text-subtle);
