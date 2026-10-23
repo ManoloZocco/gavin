@@ -780,6 +780,17 @@ export const FEATURE_MIN_VERSION = {
   // with this reason, and the panel keeps showing the declared lines and
   // the copyable proposal it showed before there was a writer.
   worktreeSetupEditor: 80,
+  // The per-rail live-conflict hold (v81, lc-06). It widens an EXISTING
+  // request -- `SetOrchestration` with a rail's `holdOnLiveConflict` --
+  // so `min_version_for` (which gates request TYPES) is structurally
+  // blind to it, and this entry is the only gate there is. An older
+  // daemon parses the plan and drops the field: the human turns the hold
+  // on, the next read brings the rail back without it, and the rail
+  // never holds -- an opt-in that silently does not stick.
+  //
+  // Consumer: the rail header's hold toggle (OrchestrationRail.svelte via
+  // OrchestrationHubView), dark with this reason.
+  liveConflictHold: 81,
 } as const;
 
 export type Feature = keyof typeof FEATURE_MIN_VERSION;

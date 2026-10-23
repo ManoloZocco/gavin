@@ -62,7 +62,10 @@ import { readingOf, verdictAsksQuietly, type TurnVerdictEntry } from "$lib/agent
 /// is produced only for a caller that asked for it (`includeBlocked`),
 /// so the surface that wants it can have it without widening what the
 /// hub's inbox and the ⇧⌘A button have always listed.
-export type AttentionReason = Exclude<StepAttention, "review" | "unreviewed"> | "blocked";
+///
+/// `live-conflict` is out for the same reason as `unreviewed`: the rail
+/// held the launch, so there is no session to list.
+export type AttentionReason = Exclude<StepAttention, "review" | "unreviewed" | "live-conflict"> | "blocked";
 
 /// One session's TypeSafe turn verdict, when one was taken. Structural
 /// like everything else this module reads, so a test reaches the rule

@@ -8,7 +8,7 @@
   import type { LaunchVerdict } from "$lib/agents/launchGate";
   import { describeOverrides, toolKindLabel } from "$lib/orchestration/orchestrationTools";
   import type { Tool } from "$lib/orchestration/orchestrationTools";
-  import { attentionTip } from "$lib/orchestration/orchestration";
+  import { attentionTip, retryLabel } from "$lib/orchestration/orchestration";
   import type { CardEntry, StepAttention, StepState } from "$lib/orchestration/orchestration";
   import { stepIcon } from "$lib/ui/toolKindIcon";
 
@@ -181,7 +181,7 @@
     />
   {/if}
   {#if state === "stalled"}
-    <IconButton icon={RotateCw} label="Retry" size={13} onclick={onRetry} />
+    <IconButton icon={RotateCw} label={retryLabel(attention)} size={13} onclick={onRetry} />
   {/if}
   {#if state === "running" || state === "stalled"}
     <IconButton icon={CheckCheck} label="Mark done" size={13} onclick={onMarkDone} />

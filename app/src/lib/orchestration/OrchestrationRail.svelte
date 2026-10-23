@@ -11,6 +11,7 @@
     GripVertical,
     Ellipsis,
     LifeBuoy,
+    Users,
     FolderGit2,
     GitBranch,
     PanelsTopLeft,
@@ -113,6 +114,11 @@
     /// preference -- so it rides the same save every other rail edit
     /// does.
     onToggleAutoResume: (autoResume: boolean) => void;
+    /// Turns the live-conflict hold on or off (lc-06, liveConflictHold.ts).
+    onToggleHoldOnLiveConflict: (hold: boolean) => void;
+    /// Why the hold cannot be set here -- a daemon that would drop the
+    /// field (FEATURE_MIN_VERSION.liveConflictHold) -- or null.
+    holdOnLiveConflictBlocked?: string | null;
     /// Why this daemon cannot carry that consent, or null. A v21 daemon
     /// drops the budget field, which would turn one attempt into a loop.
     autoResumeBlocked?: string | null;
@@ -204,6 +210,8 @@
     onReset,
     onToggleAutoResume,
     autoResumeBlocked = null,
+    onToggleHoldOnLiveConflict,
+    holdOnLiveConflictBlocked = null,
     onDelete,
     onMoveAll,
     onClearDone,
@@ -581,6 +589,24 @@
           active={rail.autoResume === true}
           disabled={autoResumeBlocked !== null}
           onclick={() => onToggleAutoResume(!rail.autoResume)}
+        />
+      </span>
+      <!-- Rule O4's one opt-in exception, per rail and off by default:
+           while other rails have agents running in this rail's checkout,
+           its next launch waits for the human to confirm. The reason a
+           daemon cannot store it hangs on the span, as above. -->
+      <span use:tooltip={holdOnLiveConflictBlocked ?? ""}>
+        <IconButton
+          icon={Users}
+          label={rail.holdOnLiveConflict ? "Hold on a live conflict: on" : "Hold on a live conflict: off"}
+          tip={holdOnLiveConflictBlocked ??
+            (rail.holdOnLiveConflict
+              ? "While other rails have agents running in this rail's checkout, its next step waits for you to confirm. Click to turn off."
+              : "Make this rail wait for your confirmation before launching while other rails have agents running in its checkout. Click to turn on.")}
+          tone={rail.holdOnLiveConflict ? "accent" : "default"}
+          active={rail.holdOnLiveConflict === true}
+          disabled={holdOnLiveConflictBlocked !== null}
+          onclick={() => onToggleHoldOnLiveConflict(!rail.holdOnLiveConflict)}
         />
       </span>
       <IconButton

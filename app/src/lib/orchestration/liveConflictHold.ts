@@ -15,28 +15,46 @@
 // own rail has none. Reversible because it is only ever a WAIT -- nothing
 // is cancelled, and a confirmation releases it.
 //
-// NOT WIRED. The opt-in needs a persisted rail field the daemon does not
-// store yet: `Rail.holdOnLiveConflict` (`crates/daemon/src/orchestration.rs`
-// and the protocol's rail type, with a `FEATURE_MIN_VERSION` entry in
-// `daemonCompat.ts` and a `featureBlockedReason` consumer on the rail
-// settings surface that sets it, per CLAUDE.md's compat-gate rule).
-// Until then no rail can carry `true`, and nothing calls this: the
-// scheduler (`nextActions` in orchestration.ts) would consult it where it
-// decides a stage's steps may launch, and treat a hold as it treats a
-// stall -- the step stays pending with the reason on its chip.
-// Acknowledgement would be per window, like the conflicts box's dismissals.
+// Wired since v81. The opt-in is the persisted rail field
+// `Rail.holdOnLiveConflict` (`crates/daemon/src/orchestration.rs` and the
+// protocol's rail type), gated by `FEATURE_MIN_VERSION.liveConflictHold`
+// in `daemonCompat.ts`, whose consumer is the rail header's toggle -- an
+// older daemon drops the field, and the opt-in would silently never
+// stick. The scheduler (`nextActions` in orchestration.ts, rule 2) asks
+// this where it decides a pending step may launch and treats a hold as a
+// stall: the step does not launch, its rail pauses, and the step carries
+// this module's reason, which `stepAttentions` marks `live-conflict` --
+// "needs you". Confirming it (`retryStep` in orchestrationState.ts) adds
+// the conflict's key to that window's acknowledged set and resumes the
+// rail. Per window, like the conflicts box's dismissals: a confirmation
+// answers what this human saw here.
 //
 // Pure: the conflicts come from `detectConflicts`, computed by the caller.
 
 import type { Conflict } from "$lib/orchestration/orchestration";
 
 /// The rail's side of the question: its id, its steps, and the opt-in.
-/// `holdOnLiveConflict` is optional because no rail persists it yet (see
-/// above) -- absent reads as false, which is O4.
+/// `holdOnLiveConflict` is optional because no rail written before v81
+/// carries it -- absent (or null) reads as false, which is O4.
 export interface HoldingRail {
   id: string;
   stages: { steps: { id: string }[] }[];
-  holdOnLiveConflict?: boolean;
+  holdOnLiveConflict?: boolean | null;
+}
+
+/// The sentence a held step stalls with. One constant, because the stall
+/// reason is the only place the hold is written down: `stepAttentions`
+/// matches it to raise the "needs you" mark, and `retryStep` matches it to
+/// know a Retry is a confirmation -- a field on StepRun would be a
+/// protocol bump for a fact the app already knows, the reasoning
+/// `isUnreviewedStall` follows.
+export const LIVE_CONFLICT_HOLD_REASON =
+  "Waiting: other rails have agents running in this checkout right now. " +
+  "Confirm to start the next stage beside them.";
+
+/// Whether a stalled step is held by this rule rather than broken.
+export function isLiveConflictHoldStall(reason: string | null | undefined): boolean {
+  return reason === LIVE_CONFLICT_HOLD_REASON;
 }
 
 type SameWorktree = Extract<Conflict, { kind: "same-worktree" }>;
@@ -91,14 +109,7 @@ export function liveConflictHold(
     if (mine.length === 0 || theirs === 0) continue;
     const key = liveConflictKey(c);
     if (acknowledged.has(key)) continue;
-    return {
-      hold: true,
-      conflict: c,
-      key,
-      reason:
-        `Waiting: other rails have agents running in this checkout right now. ` +
-        `Confirm to start the next stage beside them.`,
-    };
+    return { hold: true, conflict: c, key, reason: LIVE_CONFLICT_HOLD_REASON };
   }
   return { hold: false };
 }

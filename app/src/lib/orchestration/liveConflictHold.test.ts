@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { liveConflictHold, liveConflictKey, type HoldingRail } from "$lib/orchestration/liveConflictHold";
+import {
+  LIVE_CONFLICT_HOLD_REASON,
+  isLiveConflictHoldStall,
+  liveConflictHold,
+  liveConflictKey,
+  type HoldingRail,
+} from "$lib/orchestration/liveConflictHold";
 import type { Conflict } from "$lib/orchestration/orchestration";
 import { tsSources } from "$lib/sources";
 
@@ -79,18 +85,32 @@ describe("liveConflictKey", () => {
   });
 });
 
-// Rule O4 stays the norm until the daemon persists the opt-in: nothing
-// may call this yet, and the scheduler must not read conflicts.
-describe("liveConflictHold is not wired", () => {
-  it("is called from nowhere but its own module", () => {
+describe("the hold's stall reason", () => {
+  it("is the reason the verdict carries, and is told apart from every other stall", () => {
+    expect(isLiveConflictHoldStall(LIVE_CONFLICT_HOLD_REASON)).toBe(true);
+    expect(isLiveConflictHoldStall("agent exited before the card reached Done")).toBe(false);
+    expect(isLiveConflictHoldStall(null)).toBe(false);
+  });
+
+  it("reads a null opt-in, an older plan's shape, as rule O4", () => {
+    const old: HoldingRail = { id: "r1", stages: [{ steps: [{ id: "a1" }] }], holdOnLiveConflict: null };
+    expect(liveConflictHold(old, [sameWorktree(["a1", "b1", "b2"])])).toEqual({ hold: false });
+  });
+});
+
+// Rule O4 stays the norm everywhere but the two places the opt-in is
+// read: the scheduler's launch rule, and the confirmation that releases
+// a hold. Anything else calling this would be a second scheduler.
+describe("liveConflictHold is wired to the scheduler and the confirmation only", () => {
+  it("is called from orchestration.ts and orchestrationState.ts and nowhere else", () => {
     const ts = tsSources();
     const callers = Object.entries(ts).filter(
       ([name, src]) => name !== "liveConflictHold.ts" && src.includes("liveConflictHold(")
     );
-    expect(callers.map(([name]) => name)).toEqual([]);
+    expect(callers.map(([name]) => name).sort()).toEqual(["orchestration.ts", "orchestrationState.ts"]);
   });
 
-  it("names the missing persisted field", () => {
+  it("names the persisted field it reads", () => {
     expect(tsSources()["liveConflictHold.ts"]).toContain("Rail.holdOnLiveConflict");
   });
 });

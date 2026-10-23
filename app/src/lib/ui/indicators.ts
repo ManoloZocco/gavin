@@ -77,6 +77,7 @@ import {
   TriangleAlert,
   Unlink2,
   Unplug,
+  Users,
   Wrench,
 } from "@lucide/svelte";
 import type { SessionStatus } from "$lib/core/notifications";
@@ -562,6 +563,23 @@ export function reviewWaitIndicator(): Indicator {
 /// imposed, and one glyph for both would read as "you asked for this".
 /// Warning, not danger -- nothing is broken, and reading a card is a
 /// minute's work.
+/// A step its rail's own opt-in is holding back while other rails have
+/// agents running in its checkout (liveConflictHold.ts). The step axis,
+/// like `unreviewed`, because it never launched and so has no agent to
+/// describe; several figures because the hazard is several agents in one
+/// tree. Warning: nothing broke, a person confirms and it goes.
+const LIVE_CONFLICT_HOLD = make(
+  "step",
+  "live-conflict",
+  Users,
+  "warning",
+  "waiting for you to confirm — other rails have agents running in this checkout"
+);
+
+export function liveConflictHoldIndicator(): Indicator {
+  return LIVE_CONFLICT_HOLD;
+}
+
 export function unreviewedCardIndicator(): Indicator {
   return make("step", "unreviewed", Lock, "warning", "waiting for you to review the card");
 }
@@ -909,6 +927,8 @@ export function attentionIndicator(attention: StepAttention | "blocked"): Indica
   // Nor is this one, and for a stronger reason: the step never launched,
   // so there is not even a session that has gone quiet.
   if (attention === "unreviewed") return unreviewedCardIndicator();
+  // Nor this: the rail held the launch, so there is no session either.
+  if (attention === "live-conflict") return liveConflictHoldIndicator();
   return AGENT.turn_ended;
 }
 
@@ -954,6 +974,7 @@ export function allIndicators(): Indicator[] {
     ...STEP_STATES.map(stepIndicator),
     reviewWaitIndicator(),
     unreviewedCardIndicator(),
+    liveConflictHoldIndicator(),
     ...RAIL_STATES.map(railIndicator),
     railRetryIndicator(),
     ...RUN_OUTCOME_STATES.map((state) => RUN[state]),

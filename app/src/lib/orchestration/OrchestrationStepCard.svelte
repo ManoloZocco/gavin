@@ -7,7 +7,7 @@
   import { highlightedConflict } from "$lib/orchestration/orchestrationState";
   import type { Label } from "$lib/board/kanban";
   import type { CardView, PlacedCardView } from "$lib/core/planBoard";
-  import { attentionTip } from "$lib/orchestration/orchestration";
+  import { attentionTip, retryLabel } from "$lib/orchestration/orchestration";
   import type { StepAttention, StepState } from "$lib/orchestration/orchestration";
 
   interface Props {
@@ -145,7 +145,10 @@
           >{n}</span>
         {/each}
         {#if state === "stalled"}
-          <IconButton icon={RotateCw} label="Retry" size={13} onclick={onRetry} />
+          <!-- A step its rail held on a live conflict is released by the
+               human's say-so, and Retry is that say-so (retryStep): named
+               for what it does here. -->
+          <IconButton icon={RotateCw} label={retryLabel(attention)} size={13} onclick={onRetry} />
         {/if}
         <!-- The pair, always together: these are the two honest answers
              to a step that is not going to finish on its own, and

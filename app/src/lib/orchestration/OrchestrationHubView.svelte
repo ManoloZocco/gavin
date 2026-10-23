@@ -105,6 +105,7 @@
     resumeRail,
     resetRail,
     setRailAutoResumeAction,
+    setRailHoldOnLiveConflictAction,
     retryStep,
     markStepDone,
     skipStep,
@@ -662,6 +663,9 @@
   /// it, turning one attempt into an unbounded loop. The switch is dark
   /// rather than merely unreliable.
   const autoResumeBlocked = $derived(featureBlockedReason($daemonCompat, "autoResume"));
+  /// A daemon below v81 drops the rail's `holdOnLiveConflict`: the hold
+  /// would be turned on and never stick. Dark with the reason instead.
+  const holdOnLiveConflictBlocked = $derived(featureBlockedReason($daemonCompat, "liveConflictHold"));
   const conflictSummary = $derived(orch ? conflictSummaryLines(numbered, cards, orch, tools) : []);
 
   // The workspace's one orchestration agent slot (orchestrationAgent.ts).
@@ -940,6 +944,8 @@
           onReset={() => void resetRail(workspaceId, rail.id)}
           onToggleAutoResume={(on) => void setRailAutoResumeAction(workspaceId, rail.id, on)}
           {autoResumeBlocked}
+          onToggleHoldOnLiveConflict={(on) => void setRailHoldOnLiveConflictAction(workspaceId, rail.id, on)}
+          {holdOnLiveConflictBlocked}
           onDelete={() => (railPrompt = { kind: "delete", railId: rail.id })}
           onMoveAll={(e) => handleMoveAll(rail, e)}
           onClearDone={() => (railPrompt = { kind: "clear", railId: rail.id })}
