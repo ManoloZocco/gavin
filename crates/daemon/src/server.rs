@@ -7112,6 +7112,14 @@ pub fn handle_request(manager: &SessionManager, req: Request) -> Response {
             crate::gavin::set_root_config_field(std::path::Path::new(&root_path), &key, &value)
                 .map(|_| Response::Ok)
         }
+        // The `[worktree] setup` writer (v80). The watcher's push carries
+        // the change to the app, whose trust hash then holds the lines
+        // off until the human approves them -- or, for the human's own
+        // Settings save, re-stamps it in the same breath.
+        Request::SetWorktreeSetup { root_path, lines, only_if_absent } => {
+            crate::gavin::set_worktree_setup(std::path::Path::new(&root_path), &lines, only_if_absent)
+                .map(|(written, lines)| Response::WorktreeSetupWritten { written, lines })
+        }
         Request::ScanGavinRoot { root_path } => Ok(Response::GavinTreeScanned {
             tree: crate::gavin::scan_root(std::path::Path::new(&root_path)),
         }),
@@ -7853,6 +7861,18 @@ fn agent_allows(id: &ClientIdentity, req: &Request) -> bool {
         // files in a root it already writes to.
         Request::RecordShellWrites { root, .. } => agent_root_in_scope(id, root),
 
+        // Proposing its own workspace's `[worktree] setup` (v80,
+        // `gavin_propose_worktree_setup`), and ONLY proposing: the
+        // `only_if_absent` form, which never replaces a value a human
+        // declared. The plain write -- the Settings editor's -- would let
+        // an agent swap an approved install for its own, so it falls
+        // under the same refusal as `SetRootConfigField`. Allowed at all
+        // because nothing it writes runs: the app's trust hash covers
+        // these lines, so a proposal waits inert for the human's approval.
+        Request::SetWorktreeSetup { root_path, only_if_absent, .. } => {
+            *only_if_absent && agent_root_in_scope(id, root_path)
+        }
+
         // Spawning is allowed but confined: an agent may open another
         // visible session in its OWN workspace (an orchestration agent
         // fanning out), never elsewhere.
@@ -8176,6 +8196,10 @@ fn is_privileged(req: &Request) -> bool {
             | Request::Shutdown
             | Request::EndOrphan { .. }
             | Request::SetRootConfigField { .. }
+            // Writes the shell lines a new worktree runs (v80) -- inert
+            // until the human approves them, but the same file and the
+            // same reach as `SetRootConfigField` above.
+            | Request::SetWorktreeSetup { .. }
             // Writes the MCP config that decides what the next agent
             // runs, which is the same reach `SetRootConfigField` has.
             | Request::WriteWorkspaceFile { .. }
@@ -9999,6 +10023,57 @@ mod tests {
         }
     }
 
+    /// An agent may PROPOSE its own workspace's `[worktree] setup` -- the
+    /// `only_if_absent` form -- and nothing more: the plain write would
+    /// let it replace a human's approved install, and another
+    /// workspace's root is outside its scope either way. A local
+    /// connection keeps the plain write (the Settings editor's), behind
+    /// the token switch like `SetRootConfigField`.
+    #[test]
+    fn an_agent_may_only_propose_its_own_worktree_setup() {
+        let (_ws, root, _card) = workspace_with_card();
+        let (_other, other_root, _other_card) = workspace_with_card();
+        let id = ClientIdentity::agent("sess-1", &root, &root);
+        let setup = |root_path: &str, only_if_absent: bool| Request::SetWorktreeSetup {
+            root_path: root_path.into(),
+            lines: vec!["npm ci".into()],
+            only_if_absent,
+        };
+
+        assert!(authorize(&id, &setup(&root, true), false).is_ok());
+        for req in [setup(&root, false), setup(&other_root, true)] {
+            assert!(
+                matches!(authorize(&id, &req, false), Err(Response::Forbidden { role, .. }) if role == "agent"),
+                "{req:?}"
+            );
+        }
+        assert!(is_privileged(&setup(&root, false)));
+
+        // Through the handler: the proposal lands, a second one does not
+        // replace it, and the reply names what is declared.
+        let state = tempfile::tempdir().unwrap();
+        let manager = test_manager(&state);
+        match handle_request(&manager, setup(&root, true)) {
+            Response::WorktreeSetupWritten { written, lines } => {
+                assert!(written);
+                assert_eq!(lines, vec!["npm ci".to_string()]);
+            }
+            other => panic!("expected WorktreeSetupWritten, got {other:?}"),
+        }
+        let second = Request::SetWorktreeSetup {
+            root_path: root.clone(),
+            lines: vec!["yarn install --frozen-lockfile".into()],
+            only_if_absent: true,
+        };
+        match handle_request(&manager, second) {
+            Response::WorktreeSetupWritten { written, lines } => {
+                assert!(!written, "a declared setup is never replaced by a proposal");
+                assert_eq!(lines, vec!["npm ci".to_string()]);
+            }
+            other => panic!("expected WorktreeSetupWritten, got {other:?}"),
+        }
+    }
+
     /// The agent role's half of the tool guard, and only its half: this
     /// says WHICH WORKSPACE an agent is standing in. Which tools inside
     /// it are writable is `save_tool_by_root`'s guard, tested above --
@@ -10310,6 +10385,7 @@ mod tests {
             Request::RemoveExternalGavinContext { root_path: "/x".into(), folder: "/y".into() },
             sff("/x/a.md"),
             Request::SetRootConfigField { root_path: "/x".into(), key: "k".into(), value: "v".into() },
+            Request::SetWorktreeSetup { root_path: "/x".into(), lines: vec!["npm ci".into()], only_if_absent: true },
             Request::ScanGavinRoot { root_path: "/x".into() },
             Request::ReadPrd { root_path: "/x".into() },
             Request::ReadWorkspaceFile { root_path: "/x".into(), path: "a.md".into() },

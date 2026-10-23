@@ -129,6 +129,18 @@ pub const RUN_GIT_CAPPED_MIN_VERSION: u32 = 58;
 /// `min_version_for` is their whole wire gate and `MIN_COMPATIBLE_VERSION`
 /// stands; the app's publisher owes `FEATURE_MIN_VERSION.workspaceInsights`
 /// (and its ssh-host twin) so it never sends to an older daemon.
+/// v80 is the `[worktree] setup` writer
+/// (`lc-08-propose-worktree-setup-from-lockfiles.md`):
+/// `SetWorktreeSetup`, the install lines a new worktree runs before its
+/// agent starts, written into `.gavin-root/config.toml` by the Settings
+/// editor and -- with `only_if_absent`, never over a declared value -- by
+/// `gavin_propose_worktree_setup`. Whatever lands stays inert until the
+/// human approves it through the app's trust hash, which is what lets an
+/// agent reach this write at all. One new request TYPE (and its
+/// `WorktreeSetupWritten` reply) and no widened payload, so
+/// `min_version_for` is its whole wire gate and `MIN_COMPATIBLE_VERSION`
+/// stands; the app owes `FEATURE_MIN_VERSION.worktreeSetupEditor` for the
+/// line the editor shows instead of a Save an older daemon would refuse.
 ///
 /// v78 is the activity calendar (`tbd-feat-activity-calendar.md`):
 /// `ActivityRuns`, every card run and standalone tool run of a workspace
@@ -1037,7 +1049,7 @@ pub const RUN_GIT_CAPPED_MIN_VERSION: u32 = 58;
 /// is untouched -- the gate that matters is the app's
 /// FEATURE_MIN_VERSION.groups, because a v14 daemon parses the request
 /// fine and then drops both fields on the floor.
-pub const PROTOCOL_VERSION: u32 = 79;
+pub const PROTOCOL_VERSION: u32 = 80;
 
 /// The most a `PublishWorkspaceInsights` payload may weigh, serialized
 /// (v79). Half of [`MAX_LINE_BYTES`], so the request line it rides on
@@ -1462,6 +1474,27 @@ pub enum Request {
         root_path: String,
         key: String,
         value: String,
+    },
+    /// Writes `[worktree] setup` in `<root_path>/.gavin-root/config.toml`
+    /// (v80): the shell lines a new worktree runs, `&&`-joined, before its
+    /// agent starts. Its own request rather than another
+    /// `SetRootConfigField` key because the value is a LIST, and a list
+    /// squeezed through a one-line string would need a delimiter a line
+    /// could carry. Each line is trimmed; a blank one, one with a line
+    /// break, too many lines or too long a line is refused. An empty
+    /// `lines` removes the key.
+    ///
+    /// `only_if_absent` makes it a proposal: when the file already has a
+    /// `setup` key -- even an empty one, which is a human saying "nothing"
+    /// -- nothing is written and the reply says so with the lines already
+    /// declared. That is the only form an `agent` connection may send.
+    /// Either way the lines stay inert until the human approves them in
+    /// the app (the workspace trust hash); this request never runs one.
+    SetWorktreeSetup {
+        root_path: String,
+        lines: Vec<String>,
+        #[serde(default)]
+        only_if_absent: bool,
     },
     /// Stateless scan -- no watch required (gavin-mcp's gavin_get_tree).
     ScanGavinRoot {
@@ -2786,6 +2819,12 @@ pub fn min_version_for(req: &Request) -> u32 {
         // publisher never asks an older daemon, and gavin-mcp's two tools
         // answer an older daemon with the version they need.
         Request::PublishWorkspaceInsights { .. } | Request::GetWorkspaceInsights { .. } => 79,
+        // The `[worktree] setup` writer (v80). A new request TYPE, so this
+        // match is its whole wire gate; the app mirrors it as
+        // FEATURE_MIN_VERSION.worktreeSetupEditor so the Settings editor
+        // says the daemon is too old instead of offering a Save that an
+        // older daemon would answer with an unknown-request error.
+        Request::SetWorktreeSetup { .. } => 80,
 
         // One binding, command included (v43), now the board read leaves
         // the command out. A new request TYPE, so this is the whole wire
@@ -3611,6 +3650,11 @@ pub enum Response {
     CardSession { card_session: Option<CardSession> },
     CardRuns { runs: Vec<CardRun> },
     ActivityRuns { runs: Vec<ActivityRun> },
+    /// The answer to `SetWorktreeSetup` (v80). `written` is false when
+    /// `only_if_absent` found a `setup` key already there (or the write
+    /// would have changed nothing); `lines` is what the file declares
+    /// AFTER the request, so a refused proposal shows the human's value.
+    WorktreeSetupWritten { written: bool, lines: Vec<String> },
     /// The answer to `ShellWrites` (v72).
     ShellWrites { writes: shell_writes::ShellWrites },
     /// The answer to `ListScheduledTasks` (v77).
@@ -8369,6 +8413,43 @@ mod tests {
         }
     }
 
+    /// `only_if_absent` is `serde(default)`, so a writer that leaves it
+    /// out gets the plain write it would expect -- and the reply carries
+    /// the lines as the file holds them afterwards.
+    #[test]
+    fn set_worktree_setup_roundtrips_and_defaults_to_a_plain_write() {
+        let mut buf = Vec::new();
+        let req = Request::SetWorktreeSetup {
+            root_path: "/ws".into(),
+            lines: vec!["npm ci".into(), "(cd app && npm ci)".into()],
+            only_if_absent: true,
+        };
+        write_message(&mut buf, &req).unwrap();
+        let decoded: Request = read_message(&mut Cursor::new(buf)).unwrap().unwrap();
+        match decoded {
+            Request::SetWorktreeSetup { root_path, lines, only_if_absent } => {
+                assert_eq!(root_path, "/ws");
+                assert_eq!(lines, vec!["npm ci", "(cd app && npm ci)"]);
+                assert!(only_if_absent);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+        let bare: Request =
+            serde_json::from_str(r#"{"type":"SetWorktreeSetup","root_path":"/ws","lines":[]}"#).unwrap();
+        assert!(matches!(bare, Request::SetWorktreeSetup { only_if_absent: false, .. }), "{bare:?}");
+
+        let mut buf = Vec::new();
+        let reply = Response::WorktreeSetupWritten { written: false, lines: vec!["make".into()] };
+        write_message(&mut buf, &reply).unwrap();
+        match read_message::<_, Response>(&mut Cursor::new(buf)).unwrap().unwrap() {
+            Response::WorktreeSetupWritten { written, lines } => {
+                assert!(!written);
+                assert_eq!(lines, vec!["make"]);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
     #[test]
     fn protocol_version_is_twelve_until_a_breaking_change_bumps_it() {
         // v38: NameSession.agent_conversation_id -- an agent self-
@@ -8665,7 +8746,10 @@ mod tests {
         // v79: PublishWorkspaceInsights + GetWorkspaceInsights and the
         // WorkspaceInsights reply -- what the app works out about a
         // workspace, kept by the daemon for gavin-mcp. Two new TYPES.
-        assert_eq!(PROTOCOL_VERSION, 79);
+        // v80: Request::SetWorktreeSetup + Response::WorktreeSetupWritten
+        // -- the `[worktree] setup` writer the Settings editor and
+        // gavin_propose_worktree_setup share. One new TYPE.
+        assert_eq!(PROTOCOL_VERSION, 80);
     }
 
     #[test]
@@ -9088,6 +9172,8 @@ mod tests {
             // v79: workspace insights.
             Request::PublishWorkspaceInsights { root_path: "/r".into(), insights: serde_json::json!({}) },
             Request::GetWorkspaceInsights { root_path: "/r".into() },
+            // v80: the `[worktree] setup` writer.
+            Request::SetWorktreeSetup { root_path: "/r".into(), lines: vec!["npm ci".into()], only_if_absent: true },
             // v72: what a shell call wrote.
             Request::RecordShellWrites {
                 conversation_id: "c".into(),
@@ -9454,6 +9540,8 @@ mod tests {
         // PublishWorkspaceInsights, GetWorkspaceInsights -- what the app
         // works out about a workspace, for gavin-mcp to read.
         expected.insert(79, 2);
+        // SetWorktreeSetup -- the `[worktree] setup` writer.
+        expected.insert(80, 1);
         expected.insert(u32::MAX, 1); // Request::Unknown
 
         assert_eq!(

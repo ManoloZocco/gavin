@@ -2174,6 +2174,196 @@ pub fn set_root_config_field(root: &Path, key: &str, value: &str) -> anyhow::Res
     Ok(())
 }
 
+/// How many `[worktree] setup` lines one write may declare. A real setup
+/// is an install per lockfile -- a handful; a list longer than this is
+/// not a setup a human can read before approving it.
+pub const MAX_WORKTREE_SETUP_LINES: usize = 32;
+
+/// The longest one `[worktree] setup` line may be, in bytes. Long enough
+/// for any install with its flags, short enough that the approval sheet
+/// shows the whole of what would run.
+pub const MAX_WORKTREE_SETUP_LINE_BYTES: usize = 1024;
+
+/// The lines as they would be stored: trimmed, each one checked. Refuses
+/// rather than drops, unlike `read_setup` on the reading side: dropping a
+/// line a human typed would store a setup they did not write, and the
+/// trust gate would then ask them to approve that instead.
+fn usable_setup_lines(lines: &[String]) -> anyhow::Result<Vec<String>> {
+    if lines.len() > MAX_WORKTREE_SETUP_LINES {
+        anyhow::bail!(
+            "[worktree] setup takes at most {MAX_WORKTREE_SETUP_LINES} lines, not {}",
+            lines.len()
+        );
+    }
+    lines
+        .iter()
+        .enumerate()
+        .map(|(i, raw)| {
+            let n = i + 1;
+            let line = raw.trim();
+            if line.is_empty() {
+                anyhow::bail!("[worktree] setup line {n} is blank");
+            }
+            // A line break would split one declared line into two shell
+            // lines when the chain is joined; any other control byte is
+            // invisible on the approval sheet. Tab is ordinary whitespace.
+            if line.chars().any(|c| c.is_control() && c != '\t') {
+                anyhow::bail!("[worktree] setup line {n} holds a line break or control character");
+            }
+            if line.len() > MAX_WORKTREE_SETUP_LINE_BYTES {
+                anyhow::bail!(
+                    "[worktree] setup line {n} is {} bytes; the limit is {MAX_WORKTREE_SETUP_LINE_BYTES}",
+                    line.len()
+                );
+            }
+            Ok(line.to_string())
+        })
+        .collect()
+}
+
+/// The `[worktree]` table of a parsed config, or None when there is none.
+/// A `worktree` key that is not a table at all is refused: writing a
+/// table over it would destroy whatever the human meant by it.
+fn worktree_table<'a>(
+    doc: &'a toml_edit::DocumentMut,
+    path: &Path,
+) -> anyhow::Result<Option<&'a dyn toml_edit::TableLike>> {
+    match doc.get("worktree") {
+        None => Ok(None),
+        Some(item) => item.as_table_like().map(Some).ok_or_else(|| {
+            anyhow::anyhow!("`worktree` in {} is not a table -- fix it by hand first", path.display())
+        }),
+    }
+}
+
+/// The declared `setup` lines, or None when the key is absent. Read the
+/// way `read_setup` in the app host reads them -- strings only, trimmed,
+/// blanks dropped -- so the reply names exactly what would run. A `setup`
+/// that is present but not a list still counts as PRESENT: it is the
+/// human's, and a proposal must not land over it.
+fn declared_setup(table: Option<&dyn toml_edit::TableLike>) -> Option<Vec<String>> {
+    let item = table?.get("setup")?;
+    Some(
+        item.as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default(),
+    )
+}
+
+/// Writes `[worktree] setup` in `<root>/.gavin-root/config.toml` (v80):
+/// the lines a new worktree runs, `&&`-joined in one `sh -c` at its
+/// checkout root, before its agent starts. Returns whether the file was
+/// written and the lines it declares afterwards.
+///
+/// Same discipline as `set_root_config_field`: toml_edit, so every other
+/// key, comment and blank line survives; confined to the root's own
+/// config.toml; a file that does not parse is refused, never overwritten.
+/// `[worktree]` is written as an explicit table, its list one line per
+/// entry so a diff of an edit reads line by line.
+///
+/// An empty `lines` removes the key (a root with no config.toml stays
+/// without one). With `only_if_absent`, a `setup` key already in the file
+/// -- even `setup = []` -- wins and nothing is written: that is how an
+/// agent PROPOSES without ever replacing what a human declared.
+///
+/// Nothing here runs anything, and nothing here vouches for the lines:
+/// the app's trust hash covers `[worktree] setup`, so a value written by
+/// anyone but the human's own Settings editor stays inert until the human
+/// approves it.
+pub fn set_worktree_setup(
+    root: &Path,
+    lines: &[String],
+    only_if_absent: bool,
+) -> anyhow::Result<(bool, Vec<String>)> {
+    let lines = usable_setup_lines(lines)?;
+    let gavin_dir = root.join(GAVIN_ROOT_DIR);
+    let path = gavin_dir.join("config.toml");
+    confine_write_target(root, &path)?;
+    if !gavin_dir.is_dir() {
+        anyhow::bail!("{} has no {GAVIN_ROOT_DIR} -- initialise the workspace first", root.display());
+    }
+    let existing = match std::fs::read_to_string(&path) {
+        Ok(content) => Some(content),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(anyhow::anyhow!("couldn't read {}: {e}", path.display())),
+    };
+    let mut doc = existing.as_deref().unwrap_or("").parse::<toml_edit::DocumentMut>().map_err(|_| {
+        anyhow::anyhow!("{} is not valid TOML -- fix or remove it first", path.display())
+    })?;
+    let current = declared_setup(worktree_table(&doc, &path)?);
+
+    if only_if_absent {
+        if let Some(declared) = current {
+            return Ok((false, declared));
+        }
+    }
+    // Nothing to change: the same lines, or a clear of a key that is not
+    // there -- which must not create a config.toml or a `[worktree]`.
+    if current.as_deref().unwrap_or_default() == lines.as_slice() && (current.is_some() || lines.is_empty()) {
+        return Ok((false, lines));
+    }
+    if lines.is_empty() {
+        if let Some(t) = doc.get_mut("worktree").and_then(|w| w.as_table_like_mut()) {
+            t.remove("setup");
+        }
+    } else {
+        let mut list = toml_edit::Array::new();
+        for line in &lines {
+            list.push(line.as_str());
+        }
+        for entry in list.iter_mut() {
+            entry.decor_mut().set_prefix("\n  ");
+        }
+        list.set_trailing_comma(true);
+        list.set_trailing("\n");
+        match doc.get_mut("worktree") {
+            Some(item) => {
+                let table = item
+                    .as_table_like_mut()
+                    .ok_or_else(|| anyhow::anyhow!("`worktree` in {} is not a table", path.display()))?;
+                table.insert("setup", toml_edit::value(list));
+            }
+            None => {
+                let mut table = toml_edit::Table::new();
+                table.set_implicit(false);
+                // Comments at the end of the file belong to no key, so
+                // toml_edit keeps them as the document's trailer and would
+                // print them AFTER the new table. They are almost always
+                // the scaffold's commented-out `# [worktree]` hint, so
+                // they go above the real table instead, still in order.
+                let trailer = doc.trailing().as_str().unwrap_or("").to_string();
+                if !trailer.trim().is_empty() {
+                    table.decor_mut().set_prefix(trailer);
+                    doc.set_trailing("");
+                }
+                table.insert("setup", toml_edit::value(list));
+                doc.insert("worktree", toml_edit::Item::Table(table));
+            }
+        }
+    }
+    let rendered = doc.to_string();
+    // Proven to parse before it replaces the file: the host reads this
+    // with the `toml` crate, and a file it cannot read costs the
+    // workspace its whole config, not just this key.
+    let table = rendered
+        .parse::<toml::Table>()
+        .map_err(|e| anyhow::anyhow!("refusing to write a config.toml that would not parse: {e}"))?;
+    std::fs::write(&path, &rendered)?;
+    let after = table
+        .get("worktree")
+        .and_then(|w| w.get("setup"))
+        .and_then(|s| s.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str()).map(str::to_string).collect())
+        .unwrap_or_default();
+    Ok((true, after))
+}
+
 fn scaffold_gavin_dir(root: &Path, gavin_dir: &Path) -> anyhow::Result<()> {
     for sub in ["plans", "docs", "specs"] {
         let dir = gavin_dir.join(sub);
@@ -6261,6 +6451,203 @@ mod tests {
             "this is not [ valid toml\n",
             "the file must survive untouched"
         );
+    }
+
+    // --- [worktree] setup (v80) ----------------------------------------
+
+    fn setup_root(config: Option<&str>) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let g = dir.path().join(GAVIN_ROOT_DIR);
+        std::fs::create_dir_all(&g).unwrap();
+        if let Some(c) = config {
+            std::fs::write(g.join("config.toml"), c).unwrap();
+        }
+        dir
+    }
+
+    fn config_of(dir: &tempfile::TempDir) -> String {
+        std::fs::read_to_string(dir.path().join(GAVIN_ROOT_DIR).join("config.toml")).unwrap()
+    }
+
+    /// The lines as the app host reads them back -- the reader that
+    /// actually feeds a worktree (`app/src-tauri/src/worktree_setup.rs`),
+    /// re-stated here so a write that reads back wrong there fails here.
+    fn setup_as_read(dir: &tempfile::TempDir) -> Vec<String> {
+        let table = config_of(dir).parse::<toml::Table>().unwrap();
+        table
+            .get("worktree")
+            .and_then(|w| w.get("setup"))
+            .and_then(|s| s.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str()).map(str::to_string).collect())
+            .unwrap_or_default()
+    }
+
+    fn lines(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The case that matters: a hand-edited config.toml with other keys,
+    /// comments and the scaffolded commented-out hint. Every one of them
+    /// survives, `[worktree]` arrives as an explicit table, and the host
+    /// reads back exactly the lines written, nested subshell included.
+    #[test]
+    fn set_worktree_setup_keeps_every_other_key_and_comment() {
+        let original = "version = 1\n\
+            # the team's agent\n\
+            [agent]\n\
+            profile = \"codex\" # chosen in March\n\
+            command = \"codex --full-auto\"\n\
+            \n\
+            # What a worktree gavin creates has to run before anyone can work in it.\n\
+            # [worktree]\n\
+            # setup = [\"npm install\"]\n";
+        let dir = setup_root(Some(original));
+
+        let (written, after) =
+            set_worktree_setup(dir.path(), &lines(&["  npm ci  ", "(cd app && npm ci)"]), false).unwrap();
+
+        assert!(written);
+        assert_eq!(after, lines(&["npm ci", "(cd app && npm ci)"]), "trimmed");
+        let text = config_of(&dir);
+        assert!(text.starts_with(original), "everything before is byte-identical:\n{text}");
+        assert!(text.contains("\n[worktree]\n"), "an explicit table:\n{text}");
+        assert!(text.contains("  \"(cd app && npm ci)\",\n"), "one entry per line:\n{text}");
+        assert_eq!(setup_as_read(&dir), after);
+        let table = text.parse::<toml::Table>().unwrap();
+        assert_eq!(table["agent"]["command"].as_str(), Some("codex --full-auto"));
+        assert_eq!(table["version"].as_integer(), Some(1));
+    }
+
+    /// Replacing an existing value keeps the table's neighbours and the
+    /// comment above it; an empty list then removes the key and only the
+    /// key.
+    #[test]
+    fn set_worktree_setup_replaces_and_an_empty_list_removes_the_key() {
+        let dir = setup_root(Some(
+            "[agent]\nprofile = \"claude-code\"\n\n# installs\n[worktree]\nsetup = [\"npm install\"]\nother = 1\n",
+        ));
+
+        let (written, after) = set_worktree_setup(dir.path(), &lines(&["cargo fetch"]), false).unwrap();
+        assert!(written);
+        assert_eq!(after, lines(&["cargo fetch"]));
+        let text = config_of(&dir);
+        assert!(text.contains("# installs\n[worktree]\n"), "{text}");
+        assert!(text.contains("other = 1"), "{text}");
+        assert!(!text.contains("npm install"), "{text}");
+
+        let (written, after) = set_worktree_setup(dir.path(), &[], false).unwrap();
+        assert!(written);
+        assert!(after.is_empty());
+        let text = config_of(&dir);
+        assert!(!text.contains("setup"), "{text}");
+        assert!(text.contains("other = 1"), "{text}");
+        assert!(text.contains("profile = \"claude-code\""), "{text}");
+    }
+
+    /// A proposal never lands over a declared value -- not over a list,
+    /// and not over `setup = []`, which is a human saying "nothing". The
+    /// reply carries what is declared, and the file is untouched.
+    #[test]
+    fn only_if_absent_writes_nothing_when_the_key_exists() {
+        for (config, declared) in [
+            ("[worktree]\nsetup = [\"make deps\", 7, \"\"]\n", lines(&["make deps"])),
+            ("[worktree]\nsetup = []\n", vec![]),
+            ("[worktree]\nsetup = \"not a list\"\n", vec![]),
+        ] {
+            let dir = setup_root(Some(config));
+            let (written, after) = set_worktree_setup(dir.path(), &lines(&["npm ci"]), true).unwrap();
+            assert!(!written, "{config}");
+            assert_eq!(after, declared, "{config}");
+            assert_eq!(config_of(&dir), config, "untouched");
+        }
+
+        // Absent: the proposal is written, in a file that had none and
+        // in one whose `[worktree]` has no `setup` yet.
+        let dir = setup_root(None);
+        let (written, after) = set_worktree_setup(dir.path(), &lines(&["npm ci"]), true).unwrap();
+        assert!(written);
+        assert_eq!(after, lines(&["npm ci"]));
+        assert_eq!(setup_as_read(&dir), after);
+
+        let dir = setup_root(Some("[worktree]\nother = true\n"));
+        let (written, _) = set_worktree_setup(dir.path(), &lines(&["uv sync"]), true).unwrap();
+        assert!(written);
+        assert_eq!(setup_as_read(&dir), lines(&["uv sync"]));
+    }
+
+    /// Writing what is already there, or clearing what is not, changes
+    /// nothing -- and clearing must never CREATE a config.toml.
+    #[test]
+    fn a_write_that_changes_nothing_is_not_a_write() {
+        let dir = setup_root(Some("[worktree]\nsetup = [\"npm ci\"]\n"));
+        let (written, after) = set_worktree_setup(dir.path(), &lines(&["npm ci"]), false).unwrap();
+        assert!(!written);
+        assert_eq!(after, lines(&["npm ci"]));
+
+        let bare = setup_root(None);
+        let (written, after) = set_worktree_setup(bare.path(), &[], false).unwrap();
+        assert!(!written);
+        assert!(after.is_empty());
+        assert!(!bare.path().join(GAVIN_ROOT_DIR).join("config.toml").exists());
+    }
+
+    /// Every refusal leaves the file exactly as it was.
+    #[test]
+    fn set_worktree_setup_refuses_bad_lines_and_bad_files() {
+        let config = "[worktree]\nsetup = [\"npm ci\"]\n";
+        let too_long = "x".repeat(MAX_WORKTREE_SETUP_LINE_BYTES + 1);
+        let too_many: Vec<String> = (0..=MAX_WORKTREE_SETUP_LINES).map(|i| format!("echo {i}")).collect();
+        let bad: Vec<(Vec<String>, &str)> = vec![
+            (lines(&["npm ci", "   "]), "blank"),
+            (lines(&["npm ci\nrm -rf ~"]), "line break"),
+            (lines(&["npm ci\r"]), "trailing CR is trimmed, so this one is fine"),
+            (lines(&["echo \u{1b}[2J"]), "control"),
+            (vec![too_long], "bytes"),
+            (too_many, "at most"),
+        ];
+        for (input, why) in bad {
+            let dir = setup_root(Some(config));
+            let result = set_worktree_setup(dir.path(), &input, false);
+            if why.starts_with("trailing CR") {
+                assert!(result.is_ok(), "{why}");
+                continue;
+            }
+            let err = result.unwrap_err().to_string();
+            assert!(err.contains(why), "{why}: {err}");
+            assert_eq!(config_of(&dir), config, "{why}: untouched");
+        }
+
+        let broken = "this is not [ valid toml\n";
+        let dir = setup_root(Some(broken));
+        assert!(set_worktree_setup(dir.path(), &lines(&["npm ci"]), false).is_err());
+        assert!(set_worktree_setup(dir.path(), &lines(&["npm ci"]), true).is_err());
+        assert_eq!(config_of(&dir), broken, "never overwritten");
+
+        let scalar = "worktree = \"main\"\n";
+        let dir = setup_root(Some(scalar));
+        let err = set_worktree_setup(dir.path(), &lines(&["npm ci"]), false).unwrap_err().to_string();
+        assert!(err.contains("not a table"), "{err}");
+        assert_eq!(config_of(&dir), scalar);
+
+        let no_gavin = tempfile::tempdir().unwrap();
+        let err = set_worktree_setup(no_gavin.path(), &lines(&["npm ci"]), false).unwrap_err().to_string();
+        assert!(err.contains(GAVIN_ROOT_DIR), "{err}");
+        assert!(!no_gavin.path().join(GAVIN_ROOT_DIR).exists(), "no scaffold appears");
+    }
+
+    /// The confinement every config.toml writer has: a `config.toml`
+    /// symlink leaving the root is refused and its target left alone.
+    #[test]
+    fn set_worktree_setup_refuses_a_config_symlink_leaving_the_root() {
+        let root = setup_root(None);
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("elsewhere.toml");
+        std::fs::write(&target, "name = \"outside\"\n").unwrap();
+        if !try_symlink(&target, &root.path().join(GAVIN_ROOT_DIR).join("config.toml")) {
+            return;
+        }
+        assert!(set_worktree_setup(root.path(), &lines(&["npm ci"]), false).is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "name = \"outside\"\n");
     }
 
     /// DP-05 / audit 2026-10-15: a dangling `config.toml` symlink must
