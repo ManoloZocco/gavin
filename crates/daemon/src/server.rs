@@ -500,6 +500,13 @@ fn open_agent_door(manager: &SessionManager, id: &str) -> bool {
 /// paste a queued follow-up into an agent that is busy -- that wait is
 /// exactly what the idle path is for.
 fn note_agent_ready(manager: &SessionManager, id: &str) {
+    // Its tools arrived. Any Hello at all, waiting or not: a session
+    // marked as missing them whose gavin-mcp finally starts -- an agent
+    // released from a trust screen -- has them now, and its mark goes.
+    let spawned = manager.tools_watch.lock().unwrap().remove(id);
+    if tools_missing_after(spawned, manager.tools_missing_grace()) {
+        manager.announce_tools_missing(id, false);
+    }
     if manager.awaiting_agent_since.lock().unwrap().contains_key(id) {
         manager.agent_announced.lock().unwrap().insert(id.to_string());
     }
@@ -575,6 +582,71 @@ fn spawn_agent_ready_fallback(manager: &Arc<SessionManager>, id: String, heurist
 
 /// How often the agent-ready poll looks at a waiting session's terminal.
 const AGENT_READY_POLL: Duration = Duration::from_millis(50);
+
+/// How long an agent session may run with no Hello from its gavin-mcp
+/// before it is marked as having no `gavin_*` tools (v81, lc-01).
+///
+/// Forty-five seconds, three times `AGENT_READY_GRACE`. That grace is
+/// already the bound for "the handshake is late, not absent": gavin-mcp
+/// announces itself eagerly at startup rather than on the first tool call
+/// (`announce_to_daemon`), and the CLIs start their MCP servers while the
+/// TUI is still coming up -- kimi's Hello lands before its terminal has
+/// even gone raw (`AGENT_SETTLE`). The slow path is a cold start on a
+/// loaded machine, a launcher resolving a package before anything runs,
+/// and AGENT_READY_GRACE was chosen to cover it. Three times that makes
+/// the mark mean "this is not coming", not "this is slow". It is cleared
+/// if the Hello arrives after all -- an agent held at a folder-trust or
+/// server-approval screen starts no MCP server until the human answers --
+/// so being early costs a mark that goes away, never a run.
+///
+/// Held on the manager as milliseconds, like `agent_ready_grace_ms`, so a
+/// test can shorten it instead of sleeping it out.
+const TOOLS_MISSING_GRACE: Duration = Duration::from_secs(45);
+
+/// How often the tools-missing watch looks at its session. Coarse on
+/// purpose: it is a deadline tens of seconds out, not a terminal to read.
+const TOOLS_MISSING_POLL: Duration = Duration::from_millis(250);
+
+/// Whether a watched session counts as missing its tools: it is still
+/// watched (no Hello yet) and the grace period since spawn is over.
+fn tools_missing_after(spawned: Option<Instant>, grace: Duration) -> bool {
+    spawned.is_some_and(|since| since.elapsed() >= grace)
+}
+
+/// The timer behind the tools-missing mark, spawned beside the pump for
+/// every hosted session: it returns at once for one that is not watched
+/// (a shell, a custom agent, a recovered row). At the deadline, a session
+/// still watched and still alive is marked, and the desks are told.
+///
+/// A timer and not only a read at `ListSessions`: the mark is for a
+/// session nobody is looking at closely, and the tab has to change on its
+/// own. The read stays lazy (`SessionManager::tools_missing`), so the
+/// baseline and the push can never disagree about the same instant.
+fn spawn_tools_missing_watch(manager: &Arc<SessionManager>, id: String) {
+    let Some(spawned) = manager.tools_watch.lock().unwrap().get(&id).copied() else { return };
+    let manager = Arc::clone(manager);
+    std::thread::spawn(move || {
+        loop {
+            if !manager.tools_watch.lock().unwrap().contains_key(&id) {
+                return;
+            }
+            if !manager.sessions.lock().unwrap().contains_key(&id) {
+                return;
+            }
+            if spawned.elapsed() >= manager.tools_missing_grace() {
+                break;
+            }
+            std::thread::sleep(TOOLS_MISSING_POLL);
+        }
+        manager.announce_tools_missing(&id, true);
+        // A Hello that landed between the check above and the push has
+        // already told the desks `false`, and this `true` arrived after
+        // it. Say it again, so the last word is the right one.
+        if !manager.tools_watch.lock().unwrap().contains_key(&id) {
+            manager.announce_tools_missing(&id, false);
+        }
+    });
+}
 
 /// Why this session cannot be handed a follow-up right now, or `None` if
 /// it can.
@@ -1573,6 +1645,8 @@ fn session_summary(r: SessionRecord) -> SessionSummary {
         // Not a registry fact: the daemon's Headroom keeps it, and
         // `list_sessions` puts it in (v50).
         headroom_reach: None,
+        // Nor this one: `list_sessions` reads it off the watch (v81).
+        tools_missing: false,
     }
 }
 
@@ -1696,6 +1770,16 @@ pub struct SessionManager {
     /// shorten the wait the way `session_ceiling` is lowered, instead of
     /// sleeping the real fifteen seconds out.
     agent_ready_grace_ms: AtomicU64,
+    /// Agent sessions whose gavin-mcp is expected to say hello and has
+    /// not yet, keyed to when they were spawned (v81). Entered at spawn
+    /// for a stock agent profile only (`Launch::expects_gavin_mcp`), left
+    /// on the first Hello (`note_agent_ready`) and when the session is
+    /// killed. In here past `TOOLS_MISSING_GRACE` is what "no gavin
+    /// tools" means. In memory for the reason `awaiting_agent_since` is.
+    tools_watch: Mutex<HashMap<String, Instant>>,
+    /// See `TOOLS_MISSING_GRACE`. Millis in an atomic, like
+    /// `agent_ready_grace_ms`, so a test can shorten it.
+    tools_missing_grace_ms: AtomicU64,
     /// The size each session's PTY was last set to.
     ///
     /// Remembered so a resize that changes nothing can be told from one
@@ -2265,6 +2349,8 @@ impl SessionManager {
             awaiting_agent_since: Mutex::new(HashMap::new()),
             agent_announced: Mutex::new(std::collections::HashSet::new()),
             agent_ready_grace_ms: AtomicU64::new(AGENT_READY_GRACE.as_millis() as u64),
+            tools_watch: Mutex::new(HashMap::new()),
+            tools_missing_grace_ms: AtomicU64::new(TOOLS_MISSING_GRACE.as_millis() as u64),
             last_pty_size: Mutex::new(HashMap::new()),
             provoked_repaint_at: Mutex::new(HashMap::new()),
             session_ceiling: AtomicUsize::new(MAX_LIVE_SESSIONS),
@@ -2446,6 +2532,27 @@ impl SessionManager {
     /// The live agent-ready grace window. See `AGENT_READY_GRACE`.
     fn agent_ready_grace(&self) -> Duration {
         Duration::from_millis(self.agent_ready_grace_ms.load(Ordering::SeqCst))
+    }
+
+    /// The live tools-missing grace. See `TOOLS_MISSING_GRACE`.
+    fn tools_missing_grace(&self) -> Duration {
+        Duration::from_millis(self.tools_missing_grace_ms.load(Ordering::SeqCst))
+    }
+
+    /// Whether this session is an agent running without its `gavin_*`
+    /// tools right now (v81): watched, and past the grace with no Hello.
+    pub fn tools_missing(&self, id: &str) -> bool {
+        let spawned = self.tools_watch.lock().unwrap().get(id).copied();
+        tools_missing_after(spawned, self.tools_missing_grace())
+    }
+
+    /// Tells the desks that can be told whether `id` has its tools. A new
+    /// `Response` variant, so only an app that speaks it gets it.
+    fn announce_tools_missing(&self, id: &str, missing: bool) {
+        self.push_to_apps_speaking(
+            protocol::TOOLS_MISSING_MIN_VERSION,
+            &Response::SessionToolsMissing { id: id.to_string(), missing },
+        );
     }
 
     /// Hands this daemon its Headroom. Called once by `serve` before the
@@ -4513,6 +4620,13 @@ impl SessionManager {
         // is held for the Hello door rather than delivered on idle --
         // see `delivery_held_for_agent`.
         self.awaiting_agent_since.lock().unwrap().insert(id.clone(), Instant::now());
+        // And the tools-missing window, for an agent gavin wrote a
+        // `gavin` MCP entry for -- never a shell or a custom agent, which
+        // have no gavin-mcp to wait for (`Launch::expects_gavin_mcp`). A
+        // profile with no command line is a shell with a label.
+        if command.is_some() && launch.expects_gavin_mcp() {
+            self.tools_watch.lock().unwrap().insert(id.clone(), Instant::now());
+        }
         Ok(Created {
             id,
             compressed: compression.compressed(),
@@ -4555,6 +4669,8 @@ impl SessionManager {
                 summary.headroom_reach = headroom
                     .and_then(|headroom| headroom.reach_of(&summary.id))
                     .map(|reach| reach.id().to_string());
+                // Kept in memory beside the PTY, like the above (v81).
+                summary.tools_missing = self.tools_missing(&summary.id);
                 summary
             })
             .collect())
@@ -5910,6 +6026,7 @@ impl SessionManager {
         self.slept_mid_turn.lock().unwrap().remove(id);
         self.awaiting_agent_since.lock().unwrap().remove(id);
         self.agent_announced.lock().unwrap().remove(id);
+        self.tools_watch.lock().unwrap().remove(id);
         Ok(())
     }
 
@@ -6503,6 +6620,7 @@ impl SessionManager {
             });
             spawn_heuristic_idle_timer(&manager, id.clone(), Arc::clone(&heuristic));
             spawn_agent_ready_fallback(&manager, id.clone(), Arc::clone(&heuristic));
+            spawn_tools_missing_watch(&manager, id.clone());
 
             loop {
                 match reader.read(&mut buf) {
@@ -9136,6 +9254,7 @@ mod tests {
             worktree_path: None,
             branch: None,
             auto_resume: None,
+            hold_on_live_conflict: None,
             trigger: None,
             page_id: None,
             stages: vec![protocol::Stage {
@@ -15447,6 +15566,7 @@ mod tests {
                     worktree_path: None,
                     branch: None,
                     auto_resume: None,
+                    hold_on_live_conflict: None,
                     trigger: None,
                     page_id: None,
                     stages: vec![protocol::Stage {
@@ -19148,6 +19268,110 @@ mod tests {
         let summary = manager.list_sessions().unwrap().into_iter().find(|s| s.id == id).unwrap();
         assert!(!summary.compressed);
         assert_eq!(summary.uncompressed_reason, None);
+        manager.kill_session(&id).unwrap();
+    }
+
+    /// lc-01: an agent session whose gavin-mcp never said hello is marked
+    /// once the grace is over, and one whose gavin-mcp did is not.
+    #[test]
+    fn an_agent_session_with_no_hello_is_flagged_and_one_with_a_hello_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = test_manager(&dir);
+        manager.tools_missing_grace_ms.store(0, Ordering::SeqCst);
+        let flagged = |id: &str| {
+            manager.list_sessions().unwrap().into_iter().find(|s| s.id == id).unwrap().tools_missing
+        };
+
+        let silent = manager
+            .create_session("/tmp", "/tmp", Some("sleep 30"), Launch::Profile("claude-code"))
+            .unwrap();
+        let greeted = manager
+            .create_session("/tmp", "/tmp", Some("sleep 30"), Launch::Profile("codex"))
+            .unwrap();
+        // What a Hello presenting `greeted`'s session token does.
+        note_agent_ready(&manager, &greeted);
+
+        assert!(flagged(&silent), "no Hello past the grace is no gavin tools");
+        assert!(!flagged(&greeted), "a Hello is its tools arriving");
+
+        // A Hello that comes late clears the mark.
+        note_agent_ready(&manager, &silent);
+        assert!(!flagged(&silent));
+
+        manager.kill_session(&silent).unwrap();
+        manager.kill_session(&greeted).unwrap();
+    }
+
+    /// The mark is for an agent gavin wrote a gavin MCP entry for. A shell,
+    /// a custom agent and a profile launch with no command line have no
+    /// gavin-mcp to wait for, however long they run.
+    #[test]
+    fn a_shell_or_a_custom_agent_is_never_flagged_as_missing_its_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = test_manager(&dir);
+        manager.tools_missing_grace_ms.store(0, Ordering::SeqCst);
+
+        let shell = manager.create_session("/tmp", "/tmp", Some("sleep 30"), Launch::Shell).unwrap();
+        let tab = manager.create_session("/tmp", "/tmp", None, Launch::Shell).unwrap();
+        let custom = manager
+            .create_session("/tmp", "/tmp", Some("sleep 30"), Launch::Profile("my-agent"))
+            .unwrap();
+        let bare = manager.create_session("/tmp", "/tmp", None, Launch::Profile("claude-code")).unwrap();
+
+        for id in [&shell, &tab, &custom, &bare] {
+            assert!(!manager.tools_missing(id), "{id}");
+            manager.kill_session(id).unwrap();
+        }
+    }
+
+    /// Inside the grace an agent is only slow, not missing anything.
+    #[test]
+    fn an_agent_inside_the_grace_is_not_flagged_yet() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = test_manager(&dir);
+        let id = manager
+            .create_session("/tmp", "/tmp", Some("sleep 30"), Launch::Profile("claude-code"))
+            .unwrap();
+        assert!(!manager.tools_missing(&id));
+        manager.kill_session(&id).unwrap();
+    }
+
+    /// The desk hears the mark when the grace runs out, and hears it go
+    /// when a late Hello arrives -- and an app too old to parse the push
+    /// is never sent it.
+    #[test]
+    fn the_tools_missing_mark_is_pushed_on_and_off_to_an_app_that_speaks_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = test_manager(&dir);
+        manager.tools_missing_grace_ms.store(100, Ordering::SeqCst);
+        let (ours, theirs) = Stream::pair().unwrap();
+        theirs.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        manager.register_app_connection(protocol::TOOLS_MISSING_MIN_VERSION, Arc::new(Mutex::new(ours)));
+        let mut app = BufReader::new(theirs);
+        let (old_ours, old_theirs) = Stream::pair().unwrap();
+        old_theirs.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+        manager.register_app_connection(protocol::TOOLS_MISSING_MIN_VERSION - 1, Arc::new(Mutex::new(old_ours)));
+        let mut old_app = BufReader::new(old_theirs);
+
+        let id = manager
+            .create_session("/tmp", "/tmp", Some("sleep 30"), Launch::Profile("claude-code"))
+            .unwrap();
+        spawn_tools_missing_watch(&manager, id.clone());
+
+        let mut next = || loop {
+            match read_message::<_, Response>(&mut app).unwrap() {
+                Some(Response::SessionToolsMissing { id, missing }) => return (id, missing),
+                Some(_) => continue,
+                None => panic!("the app connection closed before the mark was pushed"),
+            }
+        };
+        assert_eq!(next(), (id.clone(), true));
+        note_agent_ready(&manager, &id);
+        assert_eq!(next(), (id.clone(), false));
+        assert!(
+            read_message::<_, Response>(&mut old_app).is_err(),
+            "an app below v81 cannot parse the push and must not be sent it"
+        );
         manager.kill_session(&id).unwrap();
     }
 

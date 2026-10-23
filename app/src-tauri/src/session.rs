@@ -4048,6 +4048,11 @@ pub struct SessionBaseline {
     pub compressed: bool,
     pub uncompressed_reason: Option<String>,
     pub headroom_reach: Option<String>,
+    /// This agent session has run past the daemon's grace with no Hello
+    /// from its gavin-mcp: it has no `gavin_*` tools (v81). Baselined for
+    /// the reason the rest are -- the `session-tools-missing` push arrives
+    /// once per app PROCESS. False from an older daemon, which never looks.
+    pub tools_missing: bool,
 }
 
 /// Every live session's cwd, status, restored, interrupted flags and
@@ -4111,6 +4116,7 @@ pub async fn get_session_baselines(
             compressed: s.compressed,
             uncompressed_reason: s.uncompressed_reason,
             headroom_reach: s.headroom_reach,
+            tools_missing: s.tools_missing,
         })
         .collect();
     Ok(SessionBaselines { sessions, hosts })
@@ -4931,6 +4937,7 @@ mod resolve_workspaces_tests {
             compressed: false,
             uncompressed_reason: None,
             headroom_reach: None,
+            tools_missing: false,
         }
     }
 
@@ -4947,6 +4954,7 @@ mod resolve_workspaces_tests {
             compressed: false,
             uncompressed_reason: None,
             headroom_reach: None,
+            tools_missing: false,
         }
     }
 
@@ -6053,6 +6061,16 @@ pub(crate) fn attach_and_relay(
                 // lost it. Only sent to an app that speaks 68.
                 Response::SessionOwnerChanged { ownership } => {
                     let _ = crate::forwarding::emit(&reader_app_handle, "session-owner-changed", ownership);
+                }
+                // An agent session never got its gavin tools, or got them
+                // late (v81). The desk's windows only: the mark's remedy
+                // is the Integration setup, which runs on this machine.
+                // Only sent to an app that speaks 81.
+                Response::SessionToolsMissing { id, missing } => {
+                    let _ = reader_app_handle.emit(
+                        "session-tools-missing",
+                        serde_json::json!({ "id": id, "missing": missing }),
+                    );
                 }
                 // Which Device a session's PTY is sized for (v74), or
                 // none: what draws the desk's "Open on …" bar. The desk's
@@ -8461,6 +8479,7 @@ mod adopt_session_tests {
             compressed: false,
             uncompressed_reason: None,
             headroom_reach: None,
+            tools_missing: false,
         }
     }
 
@@ -8477,6 +8496,7 @@ mod adopt_session_tests {
             compressed: false,
             uncompressed_reason: None,
             headroom_reach: None,
+            tools_missing: false,
         }
     }
 
@@ -8646,6 +8666,7 @@ mod main_session_tests {
             compressed: false,
             uncompressed_reason: None,
             headroom_reach: None,
+            tools_missing: false,
         }
     }
 

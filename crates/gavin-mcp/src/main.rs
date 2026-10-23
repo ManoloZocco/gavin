@@ -1493,7 +1493,7 @@ fn get_orchestration(root: &Path, transport: &mut dyn DaemonTransport) -> anyhow
         other => return Err(anyhow::anyhow!("unexpected response: {other:?}")),
     };
 
-    let tree = match transport.request(&Request::ScanGavinRoot { root_path: root_str })? {
+    let tree = match transport.request(&Request::ScanGavinRoot { root_path: root_str.clone() })? {
         Response::GavinTreeScanned { tree } => tree,
         Response::Error { message } => return Err(anyhow::anyhow!(message)),
         other => return Err(anyhow::anyhow!("unexpected response: {other:?}")),
@@ -1510,11 +1510,19 @@ fn get_orchestration(root: &Path, transport: &mut dyn DaemonTransport) -> anyhow
     let rail_run_of: HashMap<&str, &protocol::RailRun> =
         rail_runs.iter().map(|r| (r.rail_id.as_str(), r)).collect();
 
-    // One GitDirtyPaths per DISTINCT worktree: several rails may share
+    // The checkout a rail's steps run in: its worktree, or the ROOT
+    // checkout for an unbound rail. The unbound rail shares the root with
+    // every other unbound rail and with every board run, so it is the one
+    // most likely to collide -- and it used to arrive with no dirty paths
+    // at all, as if its checkout were clean.
+    let checkout_of =
+        |rail: &protocol::Rail| rail.worktree_path.clone().unwrap_or_else(|| root_str.clone());
+
+    // One GitDirtyPaths per DISTINCT checkout: several rails may share
     // one, and re-running git per rail would be pure waste.
     let mut dirty: HashMap<String, (Vec<String>, bool)> = HashMap::new();
     for rail in &rails {
-        let Some(path) = rail.worktree_path.clone() else { continue };
+        let path = checkout_of(rail);
         if dirty.contains_key(&path) {
             continue;
         }
@@ -1545,12 +1553,7 @@ fn get_orchestration(root: &Path, transport: &mut dyn DaemonTransport) -> anyhow
     let rails_json: Vec<Value> = rails
         .iter()
         .map(|rail| {
-            let (paths, truncated) = rail
-                .worktree_path
-                .as_ref()
-                .and_then(|p| dirty.get(p))
-                .cloned()
-                .unwrap_or_default();
+            let (paths, truncated) = dirty.get(&checkout_of(rail)).cloned().unwrap_or_default();
             let stages: Vec<Value> = rail
                 .stages
                 .iter()
@@ -1602,6 +1605,10 @@ fn get_orchestration(root: &Path, transport: &mut dyn DaemonTransport) -> anyhow
                 "worktreePath": rail.worktree_path,
                 "branch": rail.branch,
                 "pageId": rail.page_id,
+                // The human's opt-in to hold this rail on a live conflict
+                // (v81). Shown so an agent rewriting the rails wholesale
+                // can carry it through rather than silently clear it.
+                "holdOnLiveConflict": rail.hold_on_live_conflict,
                 "state": rail_run_of.get(rail.id.as_str()).map(|r| r.state.clone())
                     .unwrap_or_else(|| "idle".to_string()),
                 "dirtyPaths": paths,
@@ -3345,6 +3352,7 @@ mod tests {
             worktree_path: None,
             branch: None,
             auto_resume: None,
+            hold_on_live_conflict: None,
             trigger: None,
             page_id: None,
             stages,
@@ -3633,6 +3641,7 @@ mod tests {
                 worktree_path: Some("/x/wt-a".into()),
                 branch: Some("feature/api".into()),
                 auto_resume: None,
+                hold_on_live_conflict: None,
                 trigger: None,
                 page_id: None,
                 stages: vec![protocol::Stage {
@@ -4100,6 +4109,43 @@ mod tests {
         assert_eq!(text["tools"][0]["scope"], "global");
         assert_eq!(text["tools"][0]["params"][0]["default"], "origin");
         assert!(text["tools"][0]["body"].is_null(), "bodies stay out of the payload");
+    }
+
+    /// An unbound rail runs in the ROOT checkout, so its dirty paths are
+    /// the root's -- the rail sharing the checkout with every board run is
+    /// the one that most needs them, and it used to get an empty list.
+    #[test]
+    fn get_orchestration_gives_an_unbound_rail_the_root_checkouts_dirty_paths() {
+        let root = Path::new("/ws");
+        let mut orchestration = orchestration_reply();
+        if let Response::Orchestration { rails, .. } = &mut orchestration {
+            rails[0].worktree_path = None;
+        }
+        let mut t = mock(vec![
+            orchestration,
+            board_reply(),
+            tools_reply(),
+            Response::GavinTreeScanned { tree: two_card_tree() },
+            Response::DirtyPaths { paths: vec!["src/main.rs".into()], truncated: true },
+        ]);
+        let reply = handle_line(
+            r#"{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"gavin_get_orchestration","arguments":{}}}"#,
+            Some(root),
+            &mut t,
+        )
+        .unwrap();
+
+        match &t.requests[4] {
+            Request::GitDirtyPaths { cwd, .. } => assert_eq!(cwd, "/ws"),
+            other => panic!("wrong request: {other:?}"),
+        }
+        let envelope: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        let text: serde_json::Value =
+            serde_json::from_str(envelope["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert!(text["rails"][0]["worktreePath"].is_null());
+        assert!(text["rails"][0]["holdOnLiveConflict"].is_null(), "never opted in");
+        assert_eq!(text["rails"][0]["dirtyPaths"][0], "src/main.rs");
+        assert_eq!(text["rails"][0]["dirtyTruncated"], true);
     }
 
     #[test]

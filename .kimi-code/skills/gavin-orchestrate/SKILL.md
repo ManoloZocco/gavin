@@ -114,7 +114,9 @@ Two steps collide only when they edit the **same working tree**:
   conflict.
 
 Weigh the card bodies and the rail's `dirtyPaths` before co-staging
-anything. **When unsure, serialize.** A wrong serial order costs time; a
+anything. A rail with no `worktreePath` runs in the root checkout, and its
+`dirtyPaths` are the root's. When you rewrite the rails, carry each one's
+`holdOnLiveConflict` through unchanged: it is the human's choice. **When unsure, serialize.** A wrong serial order costs time; a
 wrong parallel one costs a merge conflict in a live checkout, and the
 human has to untangle two agents' half-finished edits.
 

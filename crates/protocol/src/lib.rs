@@ -141,6 +141,29 @@ pub const RUN_GIT_CAPPED_MIN_VERSION: u32 = 58;
 /// `min_version_for` is its whole wire gate and `MIN_COMPATIBLE_VERSION`
 /// stands; the app owes `FEATURE_MIN_VERSION.worktreeSetupEditor` for the
 /// line the editor shows instead of a Save an older daemon would refuse.
+/// v81 is two pieces of the learning-curve work. The first tells the app
+/// that an agent session never got its `gavin_*` tools
+/// (`lc-01-flag-agent-sessions-without-gavin-tools.md`): a session
+/// launched with a stock agent profile whose gavin-mcp has not presented
+/// its token within `TOOLS_MISSING_GRACE` is marked, and the mark is
+/// cleared if a Hello arrives later. It travels as
+/// `SessionSummary.tools_missing` for the baseline and the
+/// `SessionToolsMissing` push for the change, sent only to an app whose
+/// `Hello` speaks `TOOLS_MISSING_MIN_VERSION` -- an older app has no arm
+/// for it, and `Response` has no catch-all. Neither is a request, so
+/// `min_version_for` is untouched; an older daemon simply never marks a
+/// session, which reads as no mark at all.
+///
+/// The second is the per-rail opt-in to hold the next stage while a live
+/// same-worktree conflict involves the rail
+/// (`lc-06-guard-parallel-runs-in-one-checkout.md`), the one exception to
+/// rule O4: `Rail.hold_on_live_conflict`, `serde(default)` and absent on
+/// every rail written before it, which reads as off. It widens an
+/// EXISTING request (`SetOrchestration`), which `min_version_for` gates
+/// by TYPE and therefore cannot see -- a v80 daemon parses the plan and
+/// drops the field, so the opt-in would silently never stick. The gate
+/// that matters is the app's `FEATURE_MIN_VERSION.liveConflictHold`.
+/// `MIN_COMPATIBLE_VERSION` stands.
 ///
 /// v78 is the activity calendar (`tbd-feat-activity-calendar.md`):
 /// `ActivityRuns`, every card run and standalone tool run of a workspace
@@ -1049,7 +1072,7 @@ pub const RUN_GIT_CAPPED_MIN_VERSION: u32 = 58;
 /// is untouched -- the gate that matters is the app's
 /// FEATURE_MIN_VERSION.groups, because a v14 daemon parses the request
 /// fine and then drops both fields on the floor.
-pub const PROTOCOL_VERSION: u32 = 80;
+pub const PROTOCOL_VERSION: u32 = 81;
 
 /// The most a `PublishWorkspaceInsights` payload may weigh, serialized
 /// (v79). Half of [`MAX_LINE_BYTES`], so the request line it rides on
@@ -1057,6 +1080,11 @@ pub const PROTOCOL_VERSION: u32 = 80;
 /// snapshot well under it by capping the lists it carries, and the
 /// daemon refuses anything heavier rather than holding it.
 pub const MAX_WORKSPACE_INSIGHTS_BYTES: usize = 512 * 1024;
+
+/// The first version that marks an agent session whose gavin-mcp never
+/// said hello and pushes `SessionToolsMissing` (v81). The daemon compares
+/// the app's `Hello` version with this before it writes the push.
+pub const TOOLS_MISSING_MIN_VERSION: u32 = 81;
 
 /// The first version that has Scheduled tasks and pushes
 /// `ScheduledTasksChanged` (v77). The daemon compares the watching app's
@@ -3684,6 +3712,14 @@ pub enum Response {
     /// `.gavin-root/scheduled/` changed -- a copy edited, a report
     /// written. Read the list again.
     ScheduledTasksChanged { workspace_id: String },
+    /// Push (v81): whether this agent session is running without its
+    /// `gavin_*` tools -- launched with a stock agent profile, and no
+    /// Hello from its gavin-mcp within the daemon's grace period.
+    /// `missing: false` follows when a Hello arrives after all. Sent only
+    /// to an `app` connection that reads pushes and whose `Hello` speaks
+    /// `TOOLS_MISSING_MIN_VERSION`; `SessionSummary.tools_missing` is its
+    /// baseline.
+    SessionToolsMissing { id: String, missing: bool },
     ToolRuns { runs: Vec<ToolRun> },
     DirtyPaths { paths: Vec<String>, truncated: bool },
     Orchestration {
@@ -4677,6 +4713,18 @@ pub struct SessionSummary {
     /// app reload, never a daemon restart, which interrupts it anyway.
     #[serde(default)]
     pub headroom_reach: Option<String>,
+    /// This agent session has run past the daemon's grace period without
+    /// its gavin-mcp presenting the session token (v81): the agent is
+    /// working without any `gavin_*` tool. Only ever true for a session
+    /// launched with a stock agent profile, never for a shell, a command
+    /// tool or a custom agent gavin wrote no MCP entry for. Kept by the
+    /// daemon in memory, like `headroom_reach`: the window is measured
+    /// from a spawn only this lifetime performed.
+    ///
+    /// `serde(default)` because an older daemon does not send it, and
+    /// false is the only reading available there: it never looked.
+    #[serde(default)]
+    pub tools_missing: bool,
 }
 
 /// A surviving process, as much of it as the app needs to talk about it.
@@ -5045,6 +5093,14 @@ pub struct Rail {
     /// nobody wrote down is a decision gavin took for the human.
     #[serde(default)]
     pub trigger: Option<RailTrigger>,
+    /// Whether this rail's next stage waits while a LIVE same-worktree
+    /// conflict with another rail's running agents involves it, until the
+    /// human confirms (v81, lc-06). The one opt-in exception to rule O4,
+    /// which says a conflict never blocks a run: None and false both mean
+    /// no, which is O4 and the behaviour that predates the field. The
+    /// daemon only stores it; the app's scheduler decides what it means.
+    #[serde(default)]
+    pub hold_on_live_conflict: Option<bool>,
     pub page_id: Option<String>,
     pub stages: Vec<Stage>,
 }
@@ -7679,6 +7735,7 @@ mod tests {
             compressed: false,
             uncompressed_reason: Some("not-ready".into()),
             headroom_reach: None,
+            tools_missing: false,
         };
 
         let written = serde_json::to_string(&summary).unwrap();
@@ -7701,6 +7758,30 @@ mod tests {
         let written = serde_json::to_string(&summary).unwrap();
         assert!(written.contains(r#""headroom_reach":"unreached""#), "{written}");
         assert_eq!(serde_json::from_str::<SessionSummary>(&written).unwrap(), summary);
+    }
+
+    /// v81's half: an agent session that never got its gavin tools. An
+    /// older daemon sends nothing, and that has to read as no mark -- it
+    /// never looked, and a mark it did not draw must not appear.
+    #[test]
+    fn a_session_summary_carries_tools_missing_and_an_older_one_reads_as_unmarked() {
+        let older = r#"{"id":"s1","workspace_path":"/ws","cwd":"/ws","status":"idle","restored":false}"#;
+        let read: SessionSummary = serde_json::from_str(older).unwrap();
+        assert!(!read.tools_missing);
+
+        let summary = SessionSummary { tools_missing: true, ..read };
+        let written = serde_json::to_string(&summary).unwrap();
+        assert!(written.contains(r#""tools_missing":true"#), "{written}");
+        assert_eq!(serde_json::from_str::<SessionSummary>(&written).unwrap(), summary);
+    }
+
+    #[test]
+    fn the_tools_missing_push_names_the_session_and_the_verdict() {
+        assert_eq!(
+            serde_json::to_value(Response::SessionToolsMissing { id: "s1".into(), missing: true }).unwrap(),
+            serde_json::json!({ "type": "SessionToolsMissing", "id": "s1", "missing": true })
+        );
+        assert!(TOOLS_MISSING_MIN_VERSION <= PROTOCOL_VERSION);
     }
 
     /// The override is v50's widened payload: invisible to
@@ -8749,7 +8830,12 @@ mod tests {
         // v80: Request::SetWorktreeSetup + Response::WorktreeSetupWritten
         // -- the `[worktree] setup` writer the Settings editor and
         // gavin_propose_worktree_setup share. One new TYPE.
-        assert_eq!(PROTOCOL_VERSION, 80);
+        // v81: the SessionToolsMissing push and SessionSummary.tools_missing
+        // -- an agent session that never got its gavin_* tools -- and
+        // Rail.hold_on_live_conflict. No new request TYPE, so this match
+        // is blind to both; daemonCompat.ts's `liveConflictHold` gates the
+        // widened rail.
+        assert_eq!(PROTOCOL_VERSION, 81);
     }
 
     #[test]
@@ -10136,6 +10222,7 @@ mod tests {
                 rail: Some("frontend".into()),
                 at: None,
             }),
+            hold_on_live_conflict: Some(true),
             page_id: None,
             stages: vec![Stage {
                 id: "s1".into(),
@@ -10161,6 +10248,7 @@ mod tests {
                 "branch": "feature/api",
                 "autoResume": true,
                 "trigger": { "kind": "rail-done", "rail": "frontend" },
+                "holdOnLiveConflict": true,
                 "pageId": null,
                 "stages": [{ "id": "s1", "position": 0, "mode": "parallel", "name": null,
                              "steps": [{ "id": "t1", "position": 0, "cardPath": "/x/a.md",
@@ -10202,6 +10290,9 @@ mod tests {
         // a human (or another rail's step) arms, which is what every rail
         // written before v35 is.
         assert_eq!(rail.trigger, None);
+        // ...nor into holding on a live conflict (v81). Absent is rule
+        // O4: a conflict never blocks a run.
+        assert_eq!(rail.hold_on_live_conflict, None);
     }
 
     /// A `rail-done` trigger names its rail; `all-rails-done` names
