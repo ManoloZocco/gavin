@@ -120,7 +120,7 @@ Prevedere i conflitti dal testo delle card è già stato provato e scartato con 
 - Un bottone "Risolvi con un agente" nella vista dei conflitti della tab Git, con lo stesso testo di `builtin:merge` (capire i due lati, far girare i test, abbandonare se non sicuro).
 - Un'eccezione opzionale e reversibile alla regola O4: un conflitto "live" sullo stesso worktree sospende l'avvio dello stadio successivo finché non lo si conferma.
 
-Due difetti tecnici vanno sistemati a prescindere, perché le build dev e release condividono `orchestration.sqlite` per scelta (spec `2026-09-11-per-build-daemon-isolation-design.md`): l'apertura del database non imposta un busy timeout, e `set_step_run` sovrascrive lo stato senza controllare quello attuale (`crates/daemon/src/orchestration.rs`). Il secondo l'ho dedotto dal codice e non l'ho riprodotto.
+Resta un punto tecnico, perché le build dev e release condividono `orchestration.sqlite` per scelta (spec `2026-09-11-per-build-daemon-isolation-design.md`): `set_step_run` sovrascrive lo stato senza controllare quello attuale (`crates/daemon/src/orchestration.rs`), e l'ho dedotto dal codice senza riprodurlo. In una prima versione di questo rapporto segnalavo anche l'assenza di un busy timeout sull'apertura del database: era sbagliato, perché `rusqlite` ne imposta uno di 5 secondi da sé (`inner_connection.rs:121` della versione 0.31), e un test con due connessioni sullo stesso file lo conferma.
 
 ## 5. Il primo avvio chiede troppo, e controlla poco
 
@@ -165,7 +165,7 @@ Impatto e sforzo sono stime mie, ragionate sul codice da toccare; vanno prese co
 | 9 | Verifica unica dei prerequisiti all'avvio dell'app; sonda di funzionamento delle CLI | medio | medio |
 | 10 | Rilevamento in tempo reale di due sessioni che scrivono lo stesso file | alto | alto |
 | 11 | Workspace dimostrativo sul desktop; revisione dei nomi sovraccarichi | alto | medio, con molte decisioni di prodotto |
-| 12 | Busy timeout e transizioni controllate su `orchestration.sqlite` | basso per l'utente, alto per la robustezza | basso |
+| 12 | Transizioni controllate su `orchestration.sqlite` (il busy timeout c'è già) | basso per l'utente, medio per la robustezza | medio |
 
 I primi quattro si possono fare in pochi giorni e tolgono di mezzo i guasti muti più frequenti. Dal quinto in poi serve una decisione di prodotto per ciascuno.
 

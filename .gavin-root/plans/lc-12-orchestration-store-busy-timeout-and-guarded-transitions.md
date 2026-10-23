@@ -15,3 +15,7 @@ Do:
 - Make step and rail run transitions compare-and-set on the expected current state, so two daemons cannot both start one step; the loser reports "already started" instead of overwriting.
 
 Done when `cargo test -p gavin-daemon` is green (re-run `gavin::tests` alone if it flakes) with the two-handle tests. Never restart the shared daemon.
+
+## Comments
+
+2026-10-23: the busy-timeout half was wrong. rusqlite 0.31 sets a 5 s busy timeout on every `Connection::open` (`src/inner_connection.rs:121`), and a test holding `BEGIN IMMEDIATE` on a second connection showed `set_rail_run` already waits it out with no change. Only the guarded transitions remain. A daemon-side compare-and-set cannot tell a legitimate resume (running sess-1 → running sess-2 in one daemon, see the existing test near `orchestration.rs:2207`) from the other build starting the same step, so this needs the app to send the state it expects, which widens `SetStepRun` and needs the FEATURE_MIN_VERSION treatment. Left for a decision on whether it is worth that.
