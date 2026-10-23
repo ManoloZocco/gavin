@@ -12,7 +12,12 @@
     wizardWorkspaceId,
   } from "$lib/core/layoutState";
   import { resolveAgentConfig, resolvePrdPath } from "$lib/core/settings";
-  import { setupBannerText, setupProgress } from "$lib/workspace/setupWizard";
+  import {
+    MCP_HEALTH_READING,
+    setupBannerText,
+    setupProgress,
+    type McpHealthReading,
+  } from "$lib/workspace/setupWizard";
   import { reportSetupProgress } from "$lib/workspace/setupProgressState";
   import { UNKNOWN_STATUS, type AgentSkillsMark, type AgentSkillsStatus } from "$lib/agents/agentSkills";
   import { workspaceHeadroomReading } from "$lib/agents/headroomSetup";
@@ -152,6 +157,36 @@
     });
   });
 
+  // Whether the agent's MCP entry would start (lc-03), the Integration
+  // step's second half. The Playwright reading's shape: asked again when
+  // the wizard opens or closes -- its Integration step is where a dead
+  // entry is repaired -- or the agent changes; the last answer stays up
+  // while the next is out, so the banner does not blink, and only a
+  // different root drops it to "reading", which holds the banner back.
+  // A check that threw settles to undefined: the marker rule, never a
+  // banner held back for good.
+  let mcpHealth = $state<McpHealthReading | undefined>(MCP_HEALTH_READING);
+  let mcpHealthRoot: string | null = null;
+  let mcpHealthToken = 0;
+  $effect(() => {
+    const r = root;
+    void $wizardWorkspaceId;
+    void agentCommand;
+    void agentFile;
+    const mine = ++mcpHealthToken;
+    if (r !== mcpHealthRoot) {
+      mcpHealth = MCP_HEALTH_READING;
+      mcpHealthRoot = r;
+    }
+    if (!r) return;
+    void backend
+      .mcpHealth(r)
+      .catch(() => undefined)
+      .then((res) => {
+        if (mine === mcpHealthToken) mcpHealth = res;
+      });
+  });
+
   const setup = $derived(
     setupProgress({
       hasRoot: Boolean(root),
@@ -174,6 +209,7 @@
       headroomAsked: Boolean(ws?.headroomAsked),
       playwright,
       playwrightMark,
+      mcpHealth,
     })
   );
 

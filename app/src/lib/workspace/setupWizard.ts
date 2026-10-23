@@ -73,6 +73,71 @@ export const PRD_PLACEHOLDERS = {
 
 const MARKER_START = "<!-- gavin:start -->";
 
+/// The host's answer about the agent's MCP entry (`mcp_health`,
+/// `mcp_health.rs`): whether gavin's entry is in the profile's MCP
+/// config, and whether the command it names would start. `runnable` is
+/// null when gavin cannot tell from here -- an ssh workspace, whose
+/// binary is on the host, or a profile with no MCP file to read.
+export interface McpHealth {
+  entryPresent: boolean;
+  command: string | null;
+  runnable: boolean | null;
+  reason: string | null;
+  configFile: string | null;
+}
+
+/// `mcpHealth`'s value while the host is still being asked. A string
+/// rather than `undefined` because the field itself is optional: absent
+/// is an older read path that never asks, and must keep meaning "use the
+/// marker rule", not "wait for an answer that is not coming".
+export const MCP_HEALTH_READING = "reading" as const;
+export type McpHealthReading = McpHealth | typeof MCP_HEALTH_READING;
+
+/// The launcher a gavin checkout's MCP entry names (`MCP_LAUNCHER`,
+/// `agent_setup.rs`).
+const MCP_LAUNCHER = "scripts/gavin-mcp";
+
+/// Whether the Integration step is finished.
+///
+/// The marker block alone used to finish it, and the marker says nothing
+/// about the half that breaks: the MCP entry beside it names an absolute
+/// `gavin-mcp` that dies when the app moves, and a workspace in that
+/// state showed the step green while its agent ran with no gavin tools.
+/// So with a health answer in hand the entry has to be there AND its
+/// command has to start.
+///
+/// `runnable: null` (an ssh workspace, a profile with no MCP file) and an
+/// absent answer (a caller that does not ask) fall back to the marker
+/// rule: gavin being unable to look is not evidence the entry is dead,
+/// and failing the step on it would nag every ssh workspace for ever.
+/// The answer still in flight is the caller's `pending`, not a verdict.
+export function integrationStepDone(
+  agentFileBody: string | null | undefined,
+  health: McpHealthReading | undefined
+): boolean {
+  if (!agentFileBody?.includes(MARKER_START)) return false;
+  if (health === undefined || health === MCP_HEALTH_READING) return true;
+  return health.runnable !== false;
+}
+
+/// What the Integration step says about an entry that will not start, or
+/// null when there is nothing to say. Its button repairs the common case:
+/// re-running integration rewrites gavin's entry to the `gavin-mcp`
+/// beside this app. The launcher is the one case the button cannot fix
+/// -- it writes the launcher again -- so that line names what does.
+export function integrationHealthNote(health: McpHealthReading | undefined): string | null {
+  if (health === undefined || health === MCP_HEALTH_READING || health.runnable !== false) return null;
+  const file = health.configFile ?? "the MCP config";
+  const why = health.reason ?? "it cannot start";
+  if (!health.entryPresent) {
+    return `Your agent would start without gavin's tools: ${why}. Set up integration writes the entry.`;
+  }
+  if (health.command === MCP_LAUNCHER) {
+    return `gavin's entry in ${file} cannot start: ${why}.`;
+  }
+  return `gavin's entry in ${file} names ${health.command ?? "no command"}, which cannot start: ${why}. Set up integration points it at this app's gavin-mcp.`;
+}
+
 export interface SetupInput {
   hasRoot: boolean;
   /// config.toml's [agent].command. The scaffold writes only `profile`,
@@ -138,6 +203,11 @@ export interface SetupInput {
   /// (`loadPlaywrightMark`): "not now", or "I've set it up" where gavin
   /// could not check. Read synchronously.
   playwrightMark: PlaywrightMark | undefined;
+  /// The agent's MCP entry as the host found it (`backend.mcpHealth`),
+  /// `"reading"` while the ask is out -- pending, for the file bodies'
+  /// reason. Optional: absent means this caller does not ask, and the
+  /// Integration step keeps its marker rule (`integrationStepDone`).
+  mcpHealth?: McpHealthReading;
 }
 
 /// Whether the Playwright step is finished: the three checks found it
@@ -244,7 +314,8 @@ export function setupProgress(input: SetupInput): SetupProgress {
   }
   const done: SetupStep[] = [];
   if (input.configCommand?.trim()) done.push("agent");
-  if (input.agentFileBody?.includes(MARKER_START)) done.push("integration");
+  // The marker AND, when the host was asked, an MCP entry that starts.
+  if (integrationStepDone(input.agentFileBody, input.mcpHealth)) done.push("integration");
   // S6: a check that found it, the human's word, or their "not now".
   // The third route is why declining once stops the nagging.
   if (agentSkillsDone(input.agentSkills, input.agentSkillsMark)) done.push("agentSkills");
@@ -285,6 +356,7 @@ export function setupProgress(input: SetupInput): SetupProgress {
   const playwrightSettled = playwrightStepSettled(input.playwright, input.playwrightMark);
   const pending =
     input.agentFileBody === undefined ||
+    input.mcpHealth === MCP_HEALTH_READING ||
     input.prdBody === undefined ||
     !agentSkillsSettled ||
     !headroomSettled ||

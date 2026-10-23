@@ -19,6 +19,7 @@ import type { GitStatus, RemovedWorkspace, Workspace, WorkspacesData } from "$li
 import type { Board, CardSessionRecord, Column, Label } from "$lib/board/kanban";
 import type { AgentSkillsMark, AgentSkillsStatus } from "$lib/agents/agentSkills";
 import type { PlaywrightStatus } from "$lib/agents/playwrightSetup";
+import type { McpHealth } from "$lib/workspace/setupWizard";
 import type { BrowserFrame, DeviceBrowserWatch, LiveBrowser } from "$lib/panes/browserView";
 import type { MemoryIndexStatus } from "$lib/cards/memoryIndex";
 import type { GavinTracking } from "$lib/git/gitTracking";
@@ -1354,6 +1355,15 @@ export function scanForeignMcpServers(
   profileId?: string
 ): Promise<ForeignMcpServer[]> {
   return invoke("scan_foreign_mcp_servers", { rootPath, profileId });
+}
+
+/// Whether the workspace's MCP config carries gavin's entry and its
+/// command would start (lc-03) -- what the Integration step counts as
+/// done. `runnable: null` for an ssh workspace, whose binary is on the
+/// host. `profileId` absent asks about the profile the root resolves to,
+/// the one `setupAgentIntegration` would write.
+export function mcpHealth(rootPath: string, profileId?: string): Promise<McpHealth> {
+  return invoke("mcp_health", { rootPath, profileId });
 }
 
 export function createPlan(

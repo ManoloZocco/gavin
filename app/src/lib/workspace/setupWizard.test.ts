@@ -11,6 +11,10 @@ import {
   SETUP_STEP_LABELS,
   NAGGED_STEPS,
   setupBannerText,
+  integrationHealthNote,
+  integrationStepDone,
+  MCP_HEALTH_READING,
+  type McpHealth,
 } from "$lib/workspace/setupWizard";
 import type { AgentSkillsStatus } from "$lib/agents/agentSkills";
 import type { HeadroomStatus } from "$lib/agents/compression";
@@ -176,6 +180,77 @@ describe("setupProgress", () => {
     expect(
       setupProgress({ ...NOTHING_DONE, agentFileBody: "x\n<!-- gavin:start -->\ny\n" }).done
     ).toEqual(["integration"]);
+  });
+
+  describe("with the host's MCP health check", () => {
+    const MARKED = "x\n<!-- gavin:start -->\ny\n";
+    const health = (over: Partial<McpHealth>): McpHealth => ({
+      entryPresent: true,
+      command: "/Applications/Gavin.app/Contents/MacOS/gavin-mcp",
+      runnable: true,
+      reason: null,
+      configFile: ".mcp.json",
+      ...over,
+    });
+    const DEAD = health({ runnable: false, reason: "/Applications/Gavin.app/Contents/MacOS/gavin-mcp does not exist" });
+
+    it("counts integration only when the entry is there and its command starts", () => {
+      expect(setupProgress({ ...NOTHING_DONE, agentFileBody: MARKED, mcpHealth: health({}) }).done).toEqual([
+        "integration",
+      ]);
+      expect(setupProgress({ ...NOTHING_DONE, agentFileBody: MARKED, mcpHealth: DEAD }).done).toEqual([]);
+      expect(setupProgress({ ...ALL_DONE, mcpHealth: DEAD }).configured).toBe(false);
+      expect(setupProgress({ ...ALL_DONE, mcpHealth: DEAD }).missing).toEqual(["integration"]);
+    });
+
+    it("still needs the marker block when the entry is healthy", () => {
+      expect(setupProgress({ ...NOTHING_DONE, agentFileBody: "# mine\n", mcpHealth: health({}) }).done).toEqual([]);
+    });
+
+    it("counts a missing entry as not done", () => {
+      const missing = health({ entryPresent: false, command: null, runnable: false, reason: ".mcp.json has no gavin entry" });
+      expect(setupProgress({ ...NOTHING_DONE, agentFileBody: MARKED, mcpHealth: missing }).done).toEqual([]);
+    });
+
+    // An ssh workspace's binary is on the host, and a profile with no MCP
+    // file has nothing to check: unable to look is not dead.
+    it("falls back to the marker rule when the host cannot tell", () => {
+      const unknown = health({ entryPresent: false, command: null, runnable: null, reason: "on the host" });
+      expect(setupProgress({ ...NOTHING_DONE, agentFileBody: MARKED, mcpHealth: unknown }).done).toEqual([
+        "integration",
+      ]);
+    });
+
+    it("is pending while the check is out, and not when the caller never asks", () => {
+      expect(setupProgress({ ...ALL_DONE, mcpHealth: MCP_HEALTH_READING }).pending).toBe(true);
+      expect(setupProgress(ALL_DONE).pending).toBe(false);
+      expect(setupProgress({ ...ALL_DONE, mcpHealth: health({}) }).pending).toBe(false);
+    });
+
+    it("says what is wrong with an entry that will not start, and how the button fixes it", () => {
+      expect(integrationHealthNote(undefined)).toBeNull();
+      expect(integrationHealthNote(MCP_HEALTH_READING)).toBeNull();
+      expect(integrationHealthNote(health({}))).toBeNull();
+      expect(integrationHealthNote(health({ runnable: null }))).toBeNull();
+      const dead = integrationHealthNote(DEAD) ?? "";
+      expect(dead).toContain(".mcp.json");
+      expect(dead).toContain("does not exist");
+      expect(dead).toContain("Set up integration");
+      const launcher = integrationHealthNote(
+        health({ command: "scripts/gavin-mcp", runnable: false, reason: "scripts/gavin-mcp finds no gavin-mcp binary" })
+      );
+      expect(launcher).toContain("finds no gavin-mcp binary");
+      expect(launcher).not.toContain("Set up integration");
+      expect(
+        integrationHealthNote(health({ entryPresent: false, command: null, runnable: false, reason: "x" }))
+      ).toContain("without gavin's tools");
+    });
+
+    it("integrationStepDone reads the same rule", () => {
+      expect(integrationStepDone(MARKED, undefined)).toBe(true);
+      expect(integrationStepDone(MARKED, DEAD)).toBe(false);
+      expect(integrationStepDone(null, health({}))).toBe(false);
+    });
   });
 
   it("counts the PRD when at least one placeholder is gone", () => {

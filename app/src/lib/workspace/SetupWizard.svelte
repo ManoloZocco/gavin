@@ -14,6 +14,8 @@
     setupProgress,
     SETUP_STEPS,
     SETUP_STEP_LABELS,
+    MCP_HEALTH_READING,
+    type McpHealthReading,
     type SetupStep,
   } from "$lib/workspace/setupWizard";
   import { UNKNOWN_STATUS, type AgentSkillsMark, type AgentSkillsStatus } from "$lib/agents/agentSkills";
@@ -79,6 +81,11 @@
   // detector still running is not a detector that found nothing.
   let agentSkills = $state<AgentSkillsStatus | undefined>(undefined);
   let agentSkillsMark = $state<AgentSkillsMark | undefined>(undefined);
+  // Whether the agent's MCP entry would start (lc-03): "reading" until
+  // the host answers, which holds the wizard like the bodies above. A
+  // check that threw settles to undefined -- the marker rule -- rather
+  // than holding the wizard shut on a question with no answer coming.
+  let mcpHealth = $state<McpHealthReading | undefined>(MCP_HEALTH_READING);
   // Headroom's reading is the machine's, shared with Settings, and
   // undefined until the daemon has answered -- the same rule again: a
   // question in flight is not a Headroom that is missing.
@@ -117,7 +124,7 @@
     const root = ws?.rootPath;
     if (!root) return;
     const ssh = Boolean(ws?.ssh);
-    const [agentFile, prd, sp, marks, pw] = await Promise.all([
+    const [agentFile, prd, sp, marks, pw, health] = await Promise.all([
       backend.readFileForViewer(`${root}/${agentCfg.file}`).catch(() => null),
       backend.readFileForViewer(`${root}/${prdPath}`).catch(() => null),
       // A detector that threw still has to settle the pending flag, or
@@ -126,6 +133,7 @@
       backend.agentSkillsStatus(root, agentCfg.command).catch(() => UNKNOWN_STATUS),
       backend.getAgentSkillsMarks().catch(() => ({}) as Record<string, AgentSkillsMark>),
       ssh ? Promise.resolve(undefined) : toPlaywrightReading(backend.playwrightStatus(root)),
+      backend.mcpHealth(root).catch(() => undefined),
     ]);
     if (mine !== rereadToken) return;
     agentFileBody = agentFile?.exists ? agentFile.content : null;
@@ -133,6 +141,7 @@
     agentSkills = sp;
     agentSkillsMark = marks[root];
     playwrightAsked = pw;
+    mcpHealth = health;
   }
 
   $effect(() => {
@@ -163,6 +172,7 @@
       memorySkipped,
       playwright,
       playwrightMark,
+      mcpHealth,
     })
   );
 
@@ -219,7 +229,7 @@
         {#if current === "agent"}
           <AgentStep {workspaceId} onDone={advance} />
         {:else if current === "integration"}
-          <IntegrationStep {workspaceId} onDone={advance} />
+          <IntegrationStep {workspaceId} health={mcpHealth} onDone={advance} />
         {:else if current === "agentSkills"}
           <AgentSkillsStep
             {workspaceId}

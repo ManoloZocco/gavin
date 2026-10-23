@@ -1333,7 +1333,7 @@ fn link_by_host(app: &AppHandle, host: &str) -> Result<Route, String> {
         .ok_or_else(|| format!("not connected to {host} — reconnect the workspace"))
 }
 
-fn workspaces(app: &AppHandle) -> Vec<Workspace> {
+pub(crate) fn workspaces(app: &AppHandle) -> Vec<Workspace> {
     app.state::<WorkspacesState>().0.lock().unwrap().workspaces.clone()
 }
 

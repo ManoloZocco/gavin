@@ -206,6 +206,9 @@ const OFF_MAIN_THREAD: [file: string, command: string, waitsOn: string][] = [
   ["fileviewer.rs", "trash_entry", "an ssh round trip, or a local Trash move"],
   ["agent_setup.rs", "setup_agent_integration", "a dozen ssh round trips in a row"],
   ["agent_setup.rs", "scan_foreign_mcp_servers", "ssh round trips for a read-only MCP scan"],
+  // The Integration step's health check, on every Home visit and wizard
+  // reread: a config read and a PATH walk.
+  ["mcp_health.rs", "mcp_health", "a config read and a PATH walk, on every Home visit"],
   ["git/commands.rs", "git_merged_branches", "`git branch --merged`, on every worktree sweep"],
   ["git/commands.rs", "git_stash_files", "`git stash show`"],
   ["git/commands.rs", "git_worktree_prune", "`git worktree prune`"],

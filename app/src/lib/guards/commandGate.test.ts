@@ -375,6 +375,8 @@ const CLASSIFICATION: Record<string, [Bucket, string?]> = {
   agent_profiles: ["ordinary"],
   // A read: which agent CLIs resolve on PATH. It spawns none of them.
   detect_agent_binaries: ["ordinary"],
+  // A read: one MCP config and a PATH walk. It starts nothing.
+  mcp_health: ["ordinary"],
   agent_model_catalog: ["ordinary"],
   agent_usage: ["ordinary"],
   pr_status: ["ordinary"],

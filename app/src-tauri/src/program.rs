@@ -157,6 +157,27 @@ fn join(dir: &str, name: &str, windows: bool) -> PathBuf {
     PathBuf::from(format!("{dir}{sep}{name}"))
 }
 
+/// Whether `path` is a file this OS would start: on unix a regular file
+/// with an execute bit -- the `[ -x ]` the `scripts/gavin-mcp` launcher
+/// tests its candidates with -- and on Windows simply a file, which is
+/// all `gavin-mcp.cmd`'s `if exist` asks. A dangling path, a directory
+/// and an unreadable stat are all "no".
+pub fn is_executable(path: &Path) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else { return false };
+    if !meta.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
 /// `resolve`, falling back to the bare name.
 ///
 /// For the call sites whose "not found" handling already lives in the

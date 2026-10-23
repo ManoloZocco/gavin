@@ -22,6 +22,7 @@ mod home;
 mod keep_running;
 mod layout;
 mod mac_window;
+mod mcp_health;
 mod memory;
 mod navigation_guard;
 mod program;
@@ -317,6 +318,7 @@ pub fn run() {
             agent_setup::scan_foreign_mcp_servers,
             agent_setup::agent_profiles,
             agent_setup::detect_agent_binaries,
+            mcp_health::mcp_health,
             agent_models::agent_model_catalog,
             agent_usage::agent_usage,
             memory::system_memory,

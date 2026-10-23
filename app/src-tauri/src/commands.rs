@@ -179,6 +179,7 @@ pub const REGISTERED_COMMANDS: &[&str] = &[
     "scan_foreign_mcp_servers",
     "agent_profiles",
     "detect_agent_binaries",
+    "mcp_health",
     "agent_model_catalog",
     "agent_usage",
     "system_memory",
