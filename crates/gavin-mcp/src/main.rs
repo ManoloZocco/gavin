@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 mod cards;
+mod insights;
 mod playwright;
 mod shell_writes;
 
@@ -729,6 +730,8 @@ fn tool_definitions() -> Value {
         { "name": "gavin_init_root", "description": "Initialize .gavin-root (PRD template, plans/docs/specs) in a folder; idempotent, never overwrites.", "inputSchema": { "type": "object", "properties": {
             "path": { "type": "string", "description": "Defaults to the current directory" }
         } } },
+        { "name": "gavin_get_effective_config", "description": "Which agent, model, effort and advisor a card in this workspace would launch on — for an unrated card and for each complexity level (trivial, simple, moderate, complex, intricate) — with every value tagged with the layer that decided it (card > complexity > workspace > app > builtin; \"unset\" means gavin passes nothing and the agent CLI's own default applies), each run's fallback chain with the usage percent at which each agent counts as spent (default 90), its pause settings and the percent at which a resume is held (default 95), and whether the complexity table is empty — in which case a card's complexity: rating changes nothing. This is the gavin app's own resolution, the one its launches use, published to the daemon; it is not re-derived here. Read-only: a single card's agent/model/effort is overridden with gavin_set_plan_field, and the complexity table, fallback chains and defaults are the human's, in Settings. Requires the workspace open in the gavin app; says how old the app's snapshot is.", "inputSchema": { "type": "object", "properties": {} } },
+        { "name": "gavin_doctor", "description": "One report of what is wrong with this workspace's gavin setup and what to do about each item, from the gavin app's latest snapshot: the setup steps not done yet; the card linter's findings, split into SAFE fixes — printed as the exact gavin_set_plan_field(path, key, value) calls to make, after which you leave a dated line under each card's ## Comments — and DECISIONS that are the human's, each with the options to offer through gavin_request_human(card, \"decision\", text, options); the [worktree] setup the repo's lockfiles imply against what .gavin-root/config.toml declares and whether it is approved (a proposal is filed with gavin_propose_worktree_setup — never written or run by you); a note when no complexity level is mapped; and how old the snapshot is. Changes nothing itself. Run it when a board, a launch or a new worktree behaves unexpectedly, and before tidying cards. Requires the workspace open in the gavin app.", "inputSchema": { "type": "object", "properties": {} } },
         { "name": "gavin_get_board", "description": "The workspace kanban board: its columns (the status vocabulary, `position` is their order and the highest is the done column rails read) and its label vocabulary. The cards themselves are in gavin_get_tree. Requires the workspace open in gavin.", "inputSchema": { "type": "object", "properties": {} } },
         { "name": "gavin_promote_task", "description": "Promote a plan's checklist item into a nested task card (rewrites the item into a link to the new file).", "inputSchema": { "type": "object", "properties": {
             "plan_path": { "type": "string" },
@@ -858,6 +861,15 @@ fn dispatch_tool(
 
     if name == "gavin_get_orchestration" {
         return get_orchestration(root, transport);
+    }
+
+    // What the app works out about this workspace (v79), read back from
+    // the daemon; both tools only say the snapshot in an agent's terms.
+    if name == "gavin_get_effective_config" {
+        return insights::get_effective_config(root, transport);
+    }
+    if name == "gavin_doctor" {
+        return insights::doctor(root, transport);
     }
 
     // Its own path for the same reason `gavin_get_orchestration` has
@@ -3477,6 +3489,61 @@ mod tests {
             !seen.lock().unwrap().iter().any(|r| matches!(r, Request::SetRailRunByRoot { .. })),
             "a gated write must produce nothing on the wire"
         );
+    }
+
+    fn call_no_args(tool: &str, transport: &mut dyn DaemonTransport) -> (String, bool) {
+        let line = format!(r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"{tool}","arguments":{{}}}}}}"#);
+        let reply = handle_line(&line, Some(Path::new("/ws")), transport).unwrap();
+        let v: Value = serde_json::from_str(&reply).unwrap();
+        (
+            v.pointer("/result/content/0/text").unwrap().as_str().unwrap().to_string(),
+            v.pointer("/result/isError").unwrap().as_bool().unwrap(),
+        )
+    }
+
+    /// Against a daemon older than v79 neither insights tool puts a byte
+    /// on the wire, and the agent is told which tool, which version and
+    /// what to do -- not "unexpected response".
+    #[test]
+    fn the_insights_tools_are_gated_on_a_daemon_that_keeps_insights() {
+        let needed = protocol::min_version_for(&Request::GetWorkspaceInsights { root_path: "/ws".into() });
+        assert_eq!(needed, 79);
+        for tool in ["gavin_get_effective_config", "gavin_doctor"] {
+            let (path, seen, _dir) = fake_daemon(needed - 1, vec![]);
+            let mut t = SocketTransport::at(path);
+            let (text, is_error) = call_no_args(tool, &mut t);
+            assert!(is_error, "{text}");
+            assert!(text.contains(tool), "{text}");
+            assert!(text.contains(&format!("v{needed}")), "{text}");
+            assert!(text.contains("restart the daemon"), "{text}");
+            assert!(
+                !seen.lock().unwrap().iter().any(|r| matches!(r, Request::GetWorkspaceInsights { .. })),
+                "a gated read must produce nothing on the wire"
+            );
+        }
+    }
+
+    #[test]
+    fn the_doctor_reads_its_own_roots_snapshot_through_tools_call() {
+        let published = Response::WorkspaceInsights {
+            insights: Some(json!({
+                "version": 1,
+                "setup": { "configured": true, "missing": [] },
+                "lint": { "findings": [], "findingsTotal": 0, "safeFixes": [] },
+            })),
+            published_at: Some(insights::now_secs()),
+        };
+        let mut t = mock(vec![published]);
+        let (text, is_error) = call_no_args("gavin_doctor", &mut t);
+        assert!(!is_error, "{text}");
+        assert!(text.starts_with("gavin doctor — /ws."), "{text}");
+        assert!(text.contains("Cards: the linter found nothing."), "{text}");
+        assert!(matches!(&t.requests[..], [Request::GetWorkspaceInsights { root_path }] if root_path == "/ws"));
+
+        let mut t = mock(vec![Response::WorkspaceInsights { insights: None, published_at: None }]);
+        let (text, is_error) = call_no_args("gavin_get_effective_config", &mut t);
+        assert!(is_error, "{text}");
+        assert!(text.contains("open in the gavin app"), "{text}");
     }
 
     fn orchestration_reply() -> Response {
