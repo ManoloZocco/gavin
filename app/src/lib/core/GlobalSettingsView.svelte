@@ -163,6 +163,7 @@
   import { launchConfigStore, saveLaunchConfig } from "$lib/agents/launchQueue";
   import { ceilingFrom, type LaunchConfig } from "$lib/agents/launchGate";
   import ToolsExplorerView from "$lib/orchestration/ToolsExplorerView.svelte";
+  import PrerequisitesPanel from "$lib/agents/PrerequisitesPanel.svelte";
 
   // Full-page app settings: opened via appSettingsOpen, closed by
   // navigating away (sidebar / hub / workspace), not by a Done button.
@@ -853,6 +854,24 @@
         "upgrade",
         "new version",
         "beta",
+      ],
+    },
+    {
+      id: "prerequisites",
+      keywords: [
+        "Prerequisites",
+        "preflight",
+        "requirements",
+        "Node.js",
+        "npx",
+        "uv",
+        "git",
+        "Git for Windows",
+        "sh.exe",
+        "agent CLI",
+        "not found",
+        "does not start",
+        "Check again",
       ],
     },
     { id: "daemon", keywords: ["Daemon", "Restart daemon", "gavin-daemon"] },
@@ -1669,6 +1688,11 @@
       {#if endpointError}
         <p class="hint warn">Couldn't save the endpoint: {endpointError}</p>
       {/if}
+    </section>
+
+    <section hidden={!settingsFilter.visible("prerequisites") || selectedSection !== "prerequisites"}>
+      <h3>Prerequisites</h3>
+      <PrerequisitesPanel />
     </section>
 
     <section hidden={!settingsFilter.visible("daemon") || selectedSection !== "daemon"}>

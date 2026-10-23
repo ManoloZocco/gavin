@@ -375,8 +375,12 @@ const CLASSIFICATION: Record<string, [Bucket, string?]> = {
   agent_profiles: ["ordinary"],
   // A read: which agent CLIs resolve on PATH. It spawns none of them.
   detect_agent_binaries: ["ordinary"],
-  // A read: one MCP config and a PATH walk. It starts nothing.
+  // Reads. mcp_health reads one MCP config and walks PATH; preflight
+  // starts git, node, uv and the agent CLIs the sweep found -- the stock
+  // profiles' binaries, never a command a repository named -- with
+  // `--version` only.
   mcp_health: ["ordinary"],
+  preflight: ["ordinary"],
   agent_model_catalog: ["ordinary"],
   agent_usage: ["ordinary"],
   pr_status: ["ordinary"],

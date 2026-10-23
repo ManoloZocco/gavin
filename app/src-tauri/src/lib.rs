@@ -26,6 +26,7 @@ mod mcp_health;
 mod memory;
 mod navigation_guard;
 mod program;
+mod preflight;
 mod pull_request;
 mod remote;
 mod scheduled;
@@ -319,6 +320,7 @@ pub fn run() {
             agent_setup::agent_profiles,
             agent_setup::detect_agent_binaries,
             mcp_health::mcp_health,
+            preflight::preflight,
             agent_models::agent_model_catalog,
             agent_usage::agent_usage,
             memory::system_memory,

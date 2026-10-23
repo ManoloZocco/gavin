@@ -250,9 +250,10 @@ const REMOTE_COMMAND_TABLE: &[(&str, RemoteAllowance)] = &[
     ("scan_foreign_mcp_servers", RemoteAllowance::Allowed),
     ("agent_profiles", RemoteAllowance::Allowed),
     ("detect_agent_binaries", RemoteAllowance::Allowed),
-    // A read: whether the Integration step's MCP entry would start --
-    // the same answer its Settings and wizard show.
+    // Reads: whether the Integration step's MCP entry would start, and
+    // the desk's prerequisites -- the same answers its Settings shows.
     ("mcp_health", RemoteAllowance::Allowed),
+    ("preflight", RemoteAllowance::Allowed),
     ("agent_model_catalog", RemoteAllowance::Allowed),
     ("agent_usage", RemoteAllowance::Allowed),
     ("system_memory", RemoteAllowance::Allowed),

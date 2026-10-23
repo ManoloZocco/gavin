@@ -7,6 +7,9 @@ import {
   missingFromAppFallback,
   suggestFallbackChain,
   suggestMainProfile,
+  usableProfileIds,
+  brokenProfileIds,
+  withRunnability,
   type DetectedAgent,
 } from "$lib/agents/agentDetect";
 
@@ -161,5 +164,49 @@ describe("detectWarnings", () => {
         row({ id: "cursor", found: false, warning: "  " }),
       ])
     ).toEqual([]);
+  });
+});
+
+// Found is not runnable (lc-09): the sweep sees a file on PATH, the
+// prerequisite check starts it with `--version`. One that does not answer
+// is listed, but never picked for the human.
+describe("runnability from the prerequisite check", () => {
+  const verdicts = new Map([
+    ["claude-code", { runnable: false, detail: "claude exited with 1: licence expired" }],
+    ["gemini", { runnable: true, detail: "1.0.0" }],
+    ["codex", { runnable: true, detail: "ignored: not found" }],
+  ]);
+  const PROBED = withRunnability(SWEEP, verdicts);
+
+  it("folds the verdicts into found rows only", () => {
+    expect(PROBED.find((d) => d.id === "claude-code")?.runnable).toBe(false);
+    expect(PROBED.find((d) => d.id === "claude-code")?.runnableDetail).toContain("licence expired");
+    expect(PROBED.find((d) => d.id === "gemini")?.runnable).toBe(true);
+    expect(PROBED.find((d) => d.id === "codex")?.runnable).toBeUndefined();
+    expect(PROBED.find((d) => d.id === "opencode")?.runnable).toBeUndefined();
+    expect(usableProfileIds(PROBED)).toEqual(["gemini", "opencode"]);
+    expect(brokenProfileIds(PROBED)).toEqual(["claude-code"]);
+  });
+
+  it("never picks a CLI that does not start, even the current one", () => {
+    const pick = (currentProfileId: string | null) =>
+      suggestMainProfile({ detected: PROBED, currentProfileId, appChains: {}, commandAlreadySet: false });
+    expect(pick(null)).toBe("gemini");
+    expect(pick("claude-code")).toBe("gemini");
+  });
+
+  it("does not seed a fallback chain with it either", () => {
+    expect(suggestFallbackChain({ detected: PROBED, mainProfileId: "gemini", appChains: {} })).toEqual([
+      "opencode",
+    ]);
+  });
+
+  it("says which found CLIs do not start", () => {
+    expect(foundAgentsSummary(PROBED)).toBe("Found: Gemini, OpenCode. Found but not starting: Claude Code.");
+  });
+
+  it("keeps the old behaviour when nothing was probed", () => {
+    expect(withRunnability(SWEEP, new Map())).toEqual(SWEEP);
+    expect(usableProfileIds(SWEEP)).toEqual(foundProfileIds(SWEEP));
   });
 });

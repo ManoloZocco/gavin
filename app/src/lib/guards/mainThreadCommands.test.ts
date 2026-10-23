@@ -207,8 +207,10 @@ const OFF_MAIN_THREAD: [file: string, command: string, waitsOn: string][] = [
   ["agent_setup.rs", "setup_agent_integration", "a dozen ssh round trips in a row"],
   ["agent_setup.rs", "scan_foreign_mcp_servers", "ssh round trips for a read-only MCP scan"],
   // The Integration step's health check, on every Home visit and wizard
-  // reread: a config read and a PATH walk.
+  // reread: a config read and a PATH walk. The prerequisite check starts
+  // git, node, uv and every agent CLI it finds, each under a 3 s deadline.
   ["mcp_health.rs", "mcp_health", "a config read and a PATH walk, on every Home visit"],
+  ["preflight.rs", "preflight", "`--version` of git, node, uv and each agent CLI, up to 3 s"],
   ["git/commands.rs", "git_merged_branches", "`git branch --merged`, on every worktree sweep"],
   ["git/commands.rs", "git_stash_files", "`git stash show`"],
   ["git/commands.rs", "git_worktree_prune", "`git worktree prune`"],

@@ -20,6 +20,7 @@ import type { Board, CardSessionRecord, Column, Label } from "$lib/board/kanban"
 import type { AgentSkillsMark, AgentSkillsStatus } from "$lib/agents/agentSkills";
 import type { PlaywrightStatus } from "$lib/agents/playwrightSetup";
 import type { McpHealth } from "$lib/workspace/setupWizard";
+import type { PreflightItem } from "$lib/agents/prerequisites";
 import type { BrowserFrame, DeviceBrowserWatch, LiveBrowser } from "$lib/panes/browserView";
 import type { MemoryIndexStatus } from "$lib/cards/memoryIndex";
 import type { GavinTracking } from "$lib/git/gitTracking";
@@ -1780,6 +1781,13 @@ export function detectAgentBinaries(): Promise<
   }>
 > {
   return invoke("detect_agent_binaries");
+}
+
+/// Every prerequisite at once -- git, Node, uv, Git for Windows' sh.exe
+/// on Windows, and each agent CLI started with `--version` (lc-09).
+/// Takes up to a few seconds: the probes run on the host's blocking pool.
+export function preflight(): Promise<PreflightItem[]> {
+  return invoke("preflight");
 }
 
 /// The models each agent CAN be given right now, keyed by profile id --

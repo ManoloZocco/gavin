@@ -10,6 +10,7 @@
     setHomeAgentShare,
     trustedAgentConfigs,
     wizardWorkspaceId,
+    openAppSettings,
   } from "$lib/core/layoutState";
   import { resolveAgentConfig, resolvePrdPath } from "$lib/core/settings";
   import {
@@ -50,6 +51,15 @@
   import { tooltip } from "$lib/core/tooltip";
   import ActivityCalendar from "$lib/activity/ActivityCalendar.svelte";
   import { openRunCard, openToolsTab } from "$lib/activity/activityNav";
+  import { chainForPrimary } from "$lib/agents/agentFallback";
+  import {
+    agentsInUse,
+    headroomNeedsUv,
+    playwrightNeedsNode,
+    prerequisiteLines,
+    prerequisiteNotice,
+  } from "$lib/agents/prerequisites";
+  import { ensurePreflight, preflightItems, preflightReading } from "$lib/agents/preflightState";
 
   interface Props {
     workspaceId: string;
@@ -218,6 +228,27 @@
   $effect(() => {
     reportSetupProgress(workspaceId, setup);
   });
+  // The prerequisite check (lc-09), asked once per window -- the Home tab
+  // a window opens on is in practice the first to ask. Noticed here only
+  // when something THIS workspace set up needs a line that is missing or
+  // broken: its agent or a fallback, Playwright's Node, Headroom's uv,
+  // and git. An ssh workspace's agents and tools run on the host, which
+  // this machine's check says nothing about, so it raises none.
+  ensurePreflight();
+  const prerequisitesNotice = $derived(
+    isSsh
+      ? null
+      : prerequisiteNotice(
+          prerequisiteLines(preflightItems($preflightReading), {
+            playwright: playwrightNeedsNode(playwright, playwrightMark),
+            headroomInstall: headroomNeedsUv(headroom),
+            agents: agentsInUse(
+              agentCfg.profileId,
+              chainForPrimary($agentDefaultsStore.fallbackChains, agentCfg.profileId)
+            ),
+          })
+        )
+  );
 
   $effect(() => {
     void fetchBoard(workspaceId);
@@ -445,6 +476,12 @@
         <span>{setupBannerText(setup)} — continue</span>
       </button>
     {/if}
+    {#if prerequisitesNotice}
+      <button type="button" class="prereq-card" onclick={openAppSettings}>
+        <b>Missing on this machine</b>
+        <span>{prerequisitesNotice} See Settings → Prerequisites.</span>
+      </button>
+    {/if}
     <!-- Home is where the workspace's own agent launches, and it is the
          tab a freshly cloned repo opens on. If its config.toml names a
          command gavin is refusing to run, this is the first place that
@@ -582,6 +619,26 @@
   }
   .setup-card span {
     color: var(--success-text);
+  }
+  /* The setup card's shape in amber: something set up here will fail. */
+  .prereq-card {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    align-items: flex-start;
+    text-align: left;
+    background: var(--surface-sunken);
+    border: 1px solid var(--border-warning);
+    border-radius: 8px;
+    padding: 8px 10px;
+    color: var(--text-muted);
+    font-family: monospace;
+    font-size: 0.8em;
+    cursor: pointer;
+    flex: 0 0 auto;
+  }
+  .prereq-card span {
+    color: var(--warning-text);
   }
   .home {
     display: flex;

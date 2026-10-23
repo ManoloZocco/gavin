@@ -4244,7 +4244,7 @@ pub fn agent_profiles() -> Vec<AgentProfileDto> {
 
 /// One row of the init-wizard PATH sweep: every built-in profile whose
 /// default command is non-empty, plus whether that command resolves.
-#[derive(serde::Serialize, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DetectedAgentDto {
     pub id: String,

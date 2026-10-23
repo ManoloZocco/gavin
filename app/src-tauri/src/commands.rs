@@ -180,6 +180,7 @@ pub const REGISTERED_COMMANDS: &[&str] = &[
     "agent_profiles",
     "detect_agent_binaries",
     "mcp_health",
+    "preflight",
     "agent_model_catalog",
     "agent_usage",
     "system_memory",
