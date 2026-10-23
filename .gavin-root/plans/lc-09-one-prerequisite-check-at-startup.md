@@ -2,7 +2,7 @@
 kind: task
 title: One prerequisite check at startup
 parent: learning-curve.md
-status: To Do
+status: In Progress
 priority: medium
 complexity: moderate
 labels: ready-for-agent
@@ -14,3 +14,10 @@ Do:
 - Probe each detected agent CLI with a cheap, non-interactive, offline-safe call (its `--version`) with a short timeout, off the main thread (CLAUDE.md and the `perf-main-thread-*` cards: no blocking calls on the main thread). Keep "found but not runnable" distinct from "not found", and do not auto-pick an unrunnable CLI as primary.
 
 Done when the touched suites are green. File a `Human test:` for the Windows case (Git for Windows absent) since no suite reaches it.
+
+- [ ] Human test: On a Windows machine without Git for Windows, Settings > Prerequisites shows sh.exe missing with the install hint and the Home tab shows the notice.
+- [ ] Human test: Make one installed agent CLI fail --version; the wizard's Agent step shows it as found, does not start, and does not select it.
+
+## Comments
+
+2026-10-23: Done: `preflight()` checks git, Node, uv, Git for Windows sh.exe and runs every detected agent CLI with --version; a Prerequisites section in Settings, a Home notice only for what this workspace needs, and the wizard never picks a CLI that does not start.

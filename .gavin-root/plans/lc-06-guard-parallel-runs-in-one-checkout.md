@@ -2,7 +2,7 @@
 kind: task
 title: Guard parallel runs in one checkout
 parent: learning-curve.md
-status: To Do
+status: In Progress
 priority: high
 complexity: complex
 labels: needs-triage
@@ -15,3 +15,10 @@ Do:
 - Give unbound rails the root checkout's dirty paths in `gavin_get_orchestration`.
 
 Needs a decision before coding, file it with `gavin_request_human`: should a live same-worktree conflict hold the next stage launch as an opt-in, which is an exception to rule O4 ("never blocks a run")? Options: A) yes, opt-in per rail B) yes, workspace setting C) no, warn only.
+
+- [ ] Human test: Start all on a column of two cards while an agent already runs in the root checkout: the confirm warns about the shared checkout and Each in its own worktree launches each card in a worktree of its own.
+- [ ] Human test: Turn on Hold on a live conflict on an unbound rail, run two other rails in the root checkout and start it: its next step stalls with needs you and a Confirm and start button that launches it.
+
+## Comments
+
+2026-10-23: Done: board launches warn when the checkout is shared and offer "Each in its own worktree"; commit via agent and builtin:commit stage per path when others are live in the checkout; the per-rail "Hold on a live conflict" opt-in (owner's decision: off by default, per rail) is stored (v81) and wired into the scheduler with "Confirm and start"; unbound rails get the root checkout's dirty paths in gavin_get_orchestration.

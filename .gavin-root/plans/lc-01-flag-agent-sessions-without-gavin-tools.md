@@ -2,7 +2,7 @@
 kind: task
 title: Flag agent sessions that never got their gavin tools
 parent: learning-curve.md
-status: To Do
+status: In Progress
 priority: high
 complexity: moderate
 labels: ready-for-agent
@@ -17,3 +17,10 @@ Do:
 - Make `scripts/gavin-mcp` and `scripts/gavin-mcp.cmd` also append their "no binary found" message to the gavin-mcp log the app reads, keeping stdout clean.
 
 Logic in a plain `.ts` module with unit tests; the `.svelte` stays a thin template. Done when `cargo test --workspace` and `cd app && npm test && npm run check` are green, with a daemon test that a session with no Hello is flagged and one with a Hello is not. Verify under a temp `$HOME`; never restart the shared daemon.
+
+- [ ] Human test: Launch a Claude Code agent in a workspace whose .mcp.json has no working gavin entry; after about 45 s the tab and sidebar row show the wrench mark, and Repair integration rewrites the integration and says to restart the agent.
+- [ ] Human test: An agent whose gavin tools connect normally never shows the wrench, and plain shell tabs never do.
+
+## Comments
+
+2026-10-23: Done in v81: an agent launched with a stock profile whose gavin-mcp has not said Hello within 45 s is marked `toolsMissing` (cleared by a late Hello), shown as a wrench on the tab and sidebar row, with "Repair integration" in the tab menu. The launcher scripts also log "no binary found" to the gavin-mcp log. Not built: showing the session's last gavin-mcp log line on click.

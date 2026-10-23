@@ -2,7 +2,7 @@
 kind: task
 title: Name card warnings for agents
 parent: learning-curve.md
-status: To Do
+status: Done
 priority: high
 complexity: simple
 labels: ready-for-agent
@@ -16,3 +16,7 @@ Do:
 - Fix the board chip text "file not found in this context" (`app/src/lib/board/BoardCard.svelte:435`, `CardDetailModal.svelte:1406`) to give the real reason when the file exists but is not a plan.
 
 Done when `cargo test --workspace` and `cd app && npm test` are green with tests for each warning kind.
+
+## Comments
+
+2026-10-23: Done: the daemon records `parseWarnings` (one line per field), gavin_get_tree carries them plus the reason a parent nests nothing, gavin_set_plan_field says when a status matches no column, gavin_get_board's description is fixed, and the board chips use the real reasons.

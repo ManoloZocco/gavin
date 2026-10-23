@@ -2,7 +2,7 @@
 kind: task
 title: Show the effective agent config
 parent: learning-curve.md
-status: To Do
+status: In Progress
 priority: high
 complexity: moderate
 labels: ready-for-agent
@@ -15,3 +15,9 @@ Do:
 - In the card detail, a line "Runs on: <agent> · <model> · <effort> (from <layer>)". In the Agents settings, a note when the complexity table is empty that ratings have no effect yet.
 
 Done when `cd app && npm test && npm run check` and `cargo test --workspace` are green, with resolver tests covering each layer winning and the empty-override case. Gate the new request type in `daemonCompat.ts` if it crosses the daemon.
+
+- [ ] Human test: Open a task card's detail: the Runs on line names the agent, model and effort and the layer they came from; with an empty complexity table the Agents settings show the note that ratings have no effect yet.
+
+## Comments
+
+2026-10-23: Done: `effectiveConfig.ts` resolves agent/model/effort/advisor per level with the layer each came from, the card detail shows "Runs on: … (from …)", the Agents settings note an empty complexity table, and gavin_get_effective_config (v79) returns the same answer to agents through the app's published insights.

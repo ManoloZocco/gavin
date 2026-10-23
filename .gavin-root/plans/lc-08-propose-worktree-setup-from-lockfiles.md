@@ -2,7 +2,7 @@
 kind: task
 title: Propose worktree setup from lockfiles
 parent: learning-curve.md
-status: To Do
+status: In Progress
 priority: medium
 complexity: moderate
 labels: ready-for-agent
@@ -15,3 +15,9 @@ Do:
 - Add a minimal editor for `[worktree] setup` in the workspace Settings, so approving is not a hand-edit.
 
 Never run a proposed command before approval. Done when the touched suites are green.
+
+- [ ] Human test: In Settings > Git > Worktree setup, Use proposal fills the editor with the detected lines and nothing is written until Save; after an agent runs gavin_propose_worktree_setup on a workspace with none, the trust banner asks for approval.
+
+## Comments
+
+2026-10-23: Done: lockfile detection, the Settings editor with Use proposal (v80 writer), and gavin_propose_worktree_setup, which writes only when no key exists; the trust gate holds every proposal off until approved. Not built: a Decision item on the setup.

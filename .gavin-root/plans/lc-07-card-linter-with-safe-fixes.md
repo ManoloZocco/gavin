@@ -2,7 +2,7 @@
 kind: task
 title: Card linter with safe fixes
 parent: learning-curve.md
-status: To Do
+status: In Progress
 priority: medium
 complexity: complex
 labels: ready-for-agent
@@ -16,3 +16,7 @@ Build on lc-02's named warnings a linter the daemon runs over a context on chang
 - Needs the human (file a `Decision:` with options via the existing human-item path): an unknown status (offer the nearest columns), a name collision blocking a move, a custom column right of Done, open human items on a Done card, labels outside the board's vocabulary.
 
 Follow the precedent of the "Clean stale" action (`app/src/lib/decisions/cleanStale.ts`). Done when the touched suites are green with a test per rule.
+
+- [ ] Human test: On the board, a card with a misspelt status, a broken parent pointing at a task, and a Shipped column placed after Done each show a warning that names the field and the reason.
+
+2026-10-23: Done: `cardLint.ts` names status, parent, done-folder, column, human-item, label, direct and duplicate-name problems on the card and column; safe fixes reach agents through gavin_doctor, which lists the exact gavin_set_plan_field writes, and the orchestrate skill applies them. The app itself still applies no fix automatically.
