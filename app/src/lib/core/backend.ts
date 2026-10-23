@@ -1182,6 +1182,10 @@ export interface SessionBaseline {
   compressed?: boolean;
   uncompressedReason?: string | null;
   headroomReach?: string | null;
+  /// An agent session with no gavin_* tools (v81): the daemon's grace ran
+  /// out with no Hello from its gavin-mcp. Absent from an older host,
+  /// which never looks -- and that reads as no mark (toolsMissing.ts).
+  toolsMissing?: boolean;
 }
 
 /// Every live session on every daemon, and which linked ssh hosts those

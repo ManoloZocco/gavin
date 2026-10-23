@@ -14,6 +14,9 @@ vi.mock("$lib/core/layoutState", () => ({
 vi.mock("$lib/panes/tabActions", () => ({ closeTabs: vi.fn().mockResolvedValue(undefined) }));
 vi.mock("$lib/shell/confirmClose", () => ({ confirmTabClose: vi.fn().mockResolvedValue(true) }));
 vi.mock("$lib/cards/bestOfNActions", () => ({ pickCandidate: vi.fn().mockResolvedValue(null) }));
+vi.mock("$lib/agents/toolsMissingRepair", () => ({
+  repairIntegrationForSession: vi.fn().mockResolvedValue(undefined),
+}));
 
 import { openPathExternally, revealPathExternally } from "$lib/core/backend";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
@@ -22,6 +25,7 @@ import { closeTabs } from "$lib/panes/tabActions";
 import { buildTabMenuEntries, type TabMenuContext, type TabMenuHooks } from "$lib/panes/tabMenu";
 import { bestOfNRuns } from "$lib/cards/bestOfNState";
 import { pickCandidate } from "$lib/cards/bestOfNActions";
+import { repairIntegrationForSession } from "$lib/agents/toolsMissingRepair";
 import { isSeparator, type ContextMenuItem } from "$lib/core/contextMenu";
 
 function ctx(extra: Partial<TabMenuContext> = {}): TabMenuContext {
@@ -242,5 +246,23 @@ describe("marking a wait as read", () => {
       (e) => e.label
     );
     expect(labels.join()).not.toContain("Mark as");
+  });
+});
+
+// lc-01: an agent with no gavin_* tools. The remedy rides the tab's own
+// menu (and so the sidebar row's, which delegates here), only while the
+// mark is up.
+describe("repairing an agent's integration", () => {
+  it("is offered on a terminal whose agent has no gavin tools, and repairs that session", () => {
+    find(buildTabMenuEntries(ctx({ toolsMissing: true }), hooks()), "Repair integration").onPick();
+    expect(repairIntegrationForSession).toHaveBeenCalledWith("b");
+  });
+
+  it("stays off a tab with nothing wrong, and off a tab with no session", () => {
+    const labels = (c: Partial<TabMenuContext>) =>
+      items(buildTabMenuEntries(ctx(c), hooks())).map((e) => e.label);
+    expect(labels({})).not.toContain("Repair integration");
+    expect(labels({ toolsMissing: false })).not.toContain("Repair integration");
+    expect(labels({ kind: "file", path: "/repo/a.md", toolsMissing: true })).not.toContain("Repair integration");
   });
 });

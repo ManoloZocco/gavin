@@ -77,6 +77,7 @@ import {
   TriangleAlert,
   Unlink2,
   Unplug,
+  Wrench,
 } from "@lucide/svelte";
 import type { SessionStatus } from "$lib/core/notifications";
 // The rails already own these three; re-declaring them here would be a
@@ -295,6 +296,25 @@ const AGENT: Record<
   // instructed is not a fault.
   paused: make("agent", "paused", Pause, "neutral", "paused — agents are paused"),
 };
+
+/// An agent session running without its gavin_* tools: launched with a
+/// stock profile, and its gavin-mcp never said hello (toolsMissing.ts).
+/// On the agent axis because it answers the agent question -- what this
+/// agent can do -- and beside the status badge rather than instead of it:
+/// the agent may well be working, just blind to the board. Warning, not
+/// danger: nothing broke in the run, and the remedy is one action away.
+/// A wrench because the missing thing is the toolbox.
+const AGENT_TOOLS_MISSING = make(
+  "agent",
+  "tools_missing",
+  Wrench,
+  "warning",
+  "no gavin_* tools — its gavin MCP server never connected"
+);
+
+export function toolsMissingIndicator(): Indicator {
+  return AGENT_TOOLS_MISSING;
+}
 
 /// The badge for a live agent session. Null / undefined means the
 /// session exists but the daemon has not said anything about it yet --
@@ -925,6 +945,7 @@ export function allIndicators(): Indicator[] {
     ...AGENT_STATES.map(agentIndicatorByState),
     AGENT.turn_ended,
     AGENT.held,
+    AGENT_TOOLS_MISSING,
     AGENT.stale,
     AGENT.decoy_edit,
     AGENT.developing,

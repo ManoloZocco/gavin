@@ -13,6 +13,8 @@ import { readEntryApplies, readEntryLabel } from "$lib/sessions/sessionRead";
 import type { SessionStatus } from "$lib/core/notifications";
 import type { TurnVerdictEntry } from "$lib/agents/turnVerdict";
 import type { ContextMenuEntry } from "$lib/core/contextMenu";
+import { REPAIR_INTEGRATION_LABEL } from "$lib/agents/toolsMissing";
+import { repairIntegrationForSession } from "$lib/agents/toolsMissingRepair";
 
 export interface TabMenuContext {
   tabId: string;
@@ -35,6 +37,8 @@ export interface TabMenuContext {
    * status above stays the daemon's own: this adds a case, it does not
    * substitute a view. */
   verdict?: TurnVerdictEntry | null;
+  /** This terminal's agent has no gavin_* tools (toolsMissing.ts). */
+  toolsMissing?: boolean;
 }
 
 export interface TabMenuHooks {
@@ -70,6 +74,17 @@ export function buildTabMenuEntries(ctx: TabMenuContext, hooks: TabMenuHooks): C
   const read = ctx.read === true;
   if (ctx.kind === "terminal" && readEntryApplies(ctx.status, read, ctx.verdict)) {
     entries.push({ label: readEntryLabel(read), onPick: () => setSessionRead(ctx.tabId, !read) });
+  }
+
+  // Only while the mark is up, like the entry above: the remedy for an
+  // agent with no gavin_* tools, the Settings panel's "Set up / update"
+  // run for this session's workspace. Never offered on a tab with nothing
+  // wrong, where it would be a setup button in a menu about tabs.
+  if (ctx.kind === "terminal" && ctx.toolsMissing === true) {
+    entries.push({
+      label: REPAIR_INTEGRATION_LABEL,
+      onPick: () => void repairIntegrationForSession(ctx.tabId).catch(fail(REPAIR_INTEGRATION_LABEL)),
+    });
   }
 
   // A best-of-N candidate, decided from where the human is actually

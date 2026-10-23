@@ -31,6 +31,9 @@
   import { ownHeadroom, resolveHeadroom } from "$lib/agents/compression";
   import { headroomException } from "$lib/agents/headroomMark";
   import { sessionCompressionById } from "$lib/agents/headroomMarkState";
+  import { toolsMissingById } from "$lib/agents/toolsMissingState";
+  import { REPAIR_INTEGRATION_LABEL, TOOLS_MISSING_TIP } from "$lib/agents/toolsMissing";
+  import { repairIntegrationForSession } from "$lib/agents/toolsMissingRepair";
   import { turnVerdictById } from "$lib/agents/turnVerdictState";
   import { verdictAttentionStatusById } from "$lib/agents/verdictAttention";
   import { gavinTrees } from "$lib/core/gavinState";
@@ -79,6 +82,7 @@
     shellOrphanIndicator,
     shellRestartedIndicator,
     tabAgentIndicator,
+    toolsMissingIndicator,
     unsavedEditsIndicator,
     type Indicator,
   } from "$lib/ui/indicators";
@@ -441,6 +445,7 @@
           // switch more than one raised by a bell (sessionRead.ts).
           verdict: $turnVerdictById[sessionId] ?? null,
           read: $layoutState.readSessionIds?.has(sessionId) === true,
+          toolsMissing: $toolsMissingById[sessionId] === true,
         },
         { startRename: startEditing, reportError: reportMenuError }
       )
@@ -683,6 +688,29 @@
           {#if tabHeadroomBadge(sessionId)}
             {@const headroom = tabHeadroomBadge(sessionId)}
             {#if headroom}<StatusBadge indicator={headroom} size={10} />{/if}
+          {/if}
+          <!-- An agent with no gavin_* tools (toolsMissing.ts). The one
+               remedy is a press away, so the mark is the button for it;
+               the tab menu offers the same entry. -->
+          {#if $toolsMissingById[sessionId]}
+            <span
+              class="tools-missing-badge"
+              role="button"
+              tabindex="-1"
+              aria-label={REPAIR_INTEGRATION_LABEL}
+              onclick={(e) => {
+                e.stopPropagation();
+                void repairIntegrationForSession(sessionId);
+              }}
+              onkeydown={(e) => {
+                if (e.key !== "Enter" && e.key !== " ") return;
+                e.preventDefault();
+                e.stopPropagation();
+                void repairIntegrationForSession(sessionId);
+              }}
+            >
+              <StatusBadge indicator={toolsMissingIndicator()} size={10} tip={TOOLS_MISSING_TIP} />
+            </span>
           {/if}
           {#if tabDeviceBadge(sessionId)}
             {@const typing = tabDeviceBadge(sessionId)}
@@ -1133,6 +1161,15 @@
     display: flex;
     align-items: center;
     flex: 0 0 auto;
+  }
+  .tools-missing-badge {
+    display: flex;
+    align-items: center;
+    flex: 0 0 auto;
+    cursor: pointer;
+  }
+  .tools-missing-badge:hover {
+    opacity: 0.75;
   }
   /* The one badge here that does something when pressed: a live process
      still editing the folder. The tone is the badge's own; this only

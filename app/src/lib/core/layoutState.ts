@@ -58,6 +58,7 @@ import {
 } from "$lib/core/settings";
 import { mergeDiscoveredModels } from "$lib/agents/agentModel";
 import { noteSessionCompression, seedSessionCompression } from "$lib/agents/headroomMarkState";
+import { noteToolsMissing, seedToolsMissing } from "$lib/agents/toolsMissingState";
 import { effectiveListForPrimary, withListForPrimary } from "$lib/agents/promptParams";
 import { workspacePatchWithoutProfile } from "$lib/agents/agentsHub";
 import { normalizeTerminalFontSize, resolveTerminalFontSize } from "$lib/terminal/terminalFont";
@@ -1158,6 +1159,9 @@ async function seedSessionBaselines(): Promise<void> {
   // The Headroom mark's facts, from the same read: a reload missed the
   // `session-compression` event each session was created with.
   seedSessionCompression(baselines);
+  // And the no-gavin-tools mark (v81), for the same reason: its push
+  // arrived once per app process.
+  seedToolsMissing(baselines);
   const known = get(layoutState);
   const fresh = baselines.filter((b) => known.cwdBySessionId[b.id] === undefined);
   for (const b of fresh) {
@@ -1445,6 +1449,14 @@ export async function bootstrap(): Promise<void> {
     await listen<{ id: string; compressed: boolean; uncompressedReason: string | null }>(
       "session-compression",
       (event) => noteSessionCompression(event.payload.id, event.payload)
+    )
+  );
+  // An agent session's gavin-mcp never said hello within the daemon's
+  // grace, or said it late after all (v81). The tab and sidebar marks
+  // read it (toolsMissing.ts).
+  unlisteners.push(
+    await listen<{ id: string; missing: boolean }>("session-tools-missing", (event) =>
+      noteToolsMissing(event.payload.id, event.payload.missing)
     )
   );
   // Fires for every change to a session's queue, whoever made it: this
