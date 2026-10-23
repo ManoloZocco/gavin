@@ -209,5 +209,11 @@ you could not check in a browser rather than implying you did.
   `label`. Reach for it when you want a few cards rather than the board:
   whether work was already done or is already on a card, a card by name, or
   the children of a plan (`parent: <plan file>`).
+- `gavin_doctor` reports what the gavin app sees wrong in this workspace
+  (unfinished setup, cards whose fields gavin cannot read, missing
+  worktree setup) with the exact fix for each: apply the ones it marks
+  safe, file the rest with `gavin_request_human`. Run it when something
+  about the workspace looks off. `gavin_get_effective_config` says which
+  agent and model each complexity level really runs on.
 - After `gavin_init_root` in a fresh repo, reconnect MCP so the tools pick up
   the new root.
