@@ -30,6 +30,23 @@ if not defined BIN for %%I in (gavin-mcp.exe) do if not "%%~$PATH:I"=="" set "BI
 
 if not defined BIN echo gavin-mcp: no binary found. Tried GAVIN_MCP, %LOCALAPPDATA%\Programs\Gavin, this checkout's target\release and target\debug, then PATH. 1>&2
 if not defined BIN echo Install Gavin, run `cargo build -p gavin-mcp`, or set GAVIN_MCP. 1>&2
+
+rem And the same, as one line, in the gavin-mcp log, because most agent
+rem UIs never show an MCP server's stderr -- see `scripts/gavin-mcp`. The
+rem file is `protocol::app_support_dir` (%LOCALAPPDATA%\gavin, else
+rem %USERPROFILE%\AppData\Local\gavin) joined with gavin-mcp.log, or
+rem gavin-mcp-dev.log when the dev daemon opened the tab (its pipe tag is
+rem gavin-daemon-dev-sock). Written only if that folder exists, and never
+rem to stdout. The stamp is UTC like the binary's own lines, or "-".
+if not defined BIN set "LOGDIR=%USERPROFILE%\AppData\Local\gavin"
+if not defined BIN if defined LOCALAPPDATA set "LOGDIR=%LOCALAPPDATA%\gavin"
+if not defined BIN set "SUFFIX="
+if not defined BIN if defined GAVIN_SESSION_SOCKET if not "%GAVIN_SESSION_SOCKET:daemon-dev=%"=="%GAVIN_SESSION_SOCKET%" set "SUFFIX=-dev"
+if not defined BIN set "SID=-"
+if not defined BIN if defined GAVIN_SESSION_ID set "SID=%GAVIN_SESSION_ID%"
+if not defined BIN set "STAMP=-"
+if not defined BIN if exist "%LOGDIR%\" for /f "usebackq delims=" %%T in (`powershell -NoProfile -NonInteractive -Command "[DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')" 2^>nul`) do set "STAMP=%%T"
+if not defined BIN if exist "%LOGDIR%\" >>"%LOGDIR%\gavin-mcp%SUFFIX%.log" 2>nul echo %STAMP% session=%SID% gavin-mcp: no binary found. Tried, in order: GAVIN_MCP, %LOCALAPPDATA%\Programs\Gavin\gavin-mcp.exe, %~dp0..\target\release\gavin-mcp.exe, %~dp0..\target\debug\gavin-mcp.exe, gavin-mcp.exe on PATH. Install Gavin, run `cargo build -p gavin-mcp`, or set GAVIN_MCP.
 if not defined BIN exit /b 1
 
 "%BIN%" %*
