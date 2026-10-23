@@ -117,6 +117,19 @@ pub const RUN_GIT_CAPPED_MIN_VERSION: u32 = 58;
 /// probe at all -- into actionable "restart the daemon" errors instead of
 /// mysteries (see the 2026-08-07 stale-daemon incident).
 ///
+/// v79 is workspace insights (`learning-curve.md`, report §2/§7): the
+/// app publishes what it works out about a workspace -- the effective
+/// agent config, the card linter's findings with their safe fixes, the
+/// worktree setup proposal, the setup steps left -- with
+/// `PublishWorkspaceInsights`, and gavin-mcp reads it back with
+/// `GetWorkspaceInsights` (`gavin_get_effective_config`, `gavin_doctor`),
+/// so an agent can diagnose a workspace from the same answer the human
+/// sees. The daemon keeps only the latest per root, in memory. Two new
+/// request TYPES and one new reply, no widened payload, so
+/// `min_version_for` is their whole wire gate and `MIN_COMPATIBLE_VERSION`
+/// stands; the app's publisher owes `FEATURE_MIN_VERSION.workspaceInsights`
+/// (and its ssh-host twin) so it never sends to an older daemon.
+///
 /// v78 is the activity calendar (`tbd-feat-activity-calendar.md`):
 /// `ActivityRuns`, every card run and standalone tool run of a workspace
 /// that started inside a time window, read off the `card_runs` and
@@ -1024,7 +1037,14 @@ pub const RUN_GIT_CAPPED_MIN_VERSION: u32 = 58;
 /// is untouched -- the gate that matters is the app's
 /// FEATURE_MIN_VERSION.groups, because a v14 daemon parses the request
 /// fine and then drops both fields on the floor.
-pub const PROTOCOL_VERSION: u32 = 78;
+pub const PROTOCOL_VERSION: u32 = 79;
+
+/// The most a `PublishWorkspaceInsights` payload may weigh, serialized
+/// (v79). Half of [`MAX_LINE_BYTES`], so the request line it rides on
+/// always fits with room for the envelope; the app keeps its own
+/// snapshot well under it by capping the lists it carries, and the
+/// daemon refuses anything heavier rather than holding it.
+pub const MAX_WORKSPACE_INSIGHTS_BYTES: usize = 512 * 1024;
 
 /// The first version that has Scheduled tasks and pushes
 /// `ScheduledTasksChanged` (v77). The daemon compares the watching app's
@@ -1867,6 +1887,26 @@ pub enum Request {
     /// run, a CLI with no hook -- which is not an error.
     ShellWrites {
         conversation_id: String,
+    },
+    /// What the app works out about a workspace (v79): the effective agent
+    /// config, the card linter's findings and safe fixes, the worktree
+    /// setup proposal and the setup steps left. The app computes all of it
+    /// in TypeScript, and an agent can reach only the daemon, so the app
+    /// hands the daemon its latest answer for the agent to read back with
+    /// `GetWorkspaceInsights`. `insights` is opaque here -- its shape is
+    /// the app's `workspaceInsights.ts` and gavin-mcp's reader -- and is
+    /// refused above [`MAX_WORKSPACE_INSIGHTS_BYTES`] serialized.
+    /// `root_path` is a watched workspace root. The app's alone.
+    PublishWorkspaceInsights {
+        root_path: String,
+        insights: serde_json::Value,
+    },
+    /// The last `PublishWorkspaceInsights` for this root (v79), answered
+    /// with `WorkspaceInsights`. Never an error for a root nothing was
+    /// published for: both fields `None`, which says "the app has not
+    /// told this daemon anything about it".
+    GetWorkspaceInsights {
+        root_path: String,
     },
     /// A workspace's Scheduled tasks (v77, ADR 0010): every copy under
     /// `.gavin-root/scheduled/`, each with its run state. `root_path` is
@@ -2739,6 +2779,14 @@ pub fn min_version_for(req: &Request) -> u32 {
         // daemon is too old rather than drawing a year with no runs in it.
         Request::ActivityRuns { .. } => 78,
 
+        // Workspace insights (v79): the app hands the daemon what it
+        // works out about a workspace, and gavin-mcp reads it back. Two
+        // new request TYPES, so this match is their whole wire gate; the
+        // app mirrors it as FEATURE_MIN_VERSION.workspaceInsights so its
+        // publisher never asks an older daemon, and gavin-mcp's two tools
+        // answer an older daemon with the version they need.
+        Request::PublishWorkspaceInsights { .. } | Request::GetWorkspaceInsights { .. } => 79,
+
         // One binding, command included (v43), now the board read leaves
         // the command out. A new request TYPE, so this is the whole wire
         // gate -- and no app surface is greyed behind it: the app host
@@ -3577,6 +3625,15 @@ pub enum Response {
         markdown: Option<String>,
         #[serde(default)]
         raw: Option<String>,
+    },
+    /// The answer to `GetWorkspaceInsights` (v79): what the app last
+    /// published for the root, and when the daemon received it (unix
+    /// seconds). Both `None` when nothing was published.
+    WorkspaceInsights {
+        #[serde(default)]
+        insights: Option<serde_json::Value>,
+        #[serde(default)]
+        published_at: Option<i64>,
     },
     /// Push to the connection watching a workspace (v77), when that app
     /// speaks `SCHEDULED_TASKS_MIN_VERSION`: something under its
@@ -8605,7 +8662,10 @@ mod tests {
         // v78: Request::ActivityRuns + Response::ActivityRuns -- a
         // workspace's card and tool runs inside a time window, for the
         // activity calendar. One new TYPE.
-        assert_eq!(PROTOCOL_VERSION, 78);
+        // v79: PublishWorkspaceInsights + GetWorkspaceInsights and the
+        // WorkspaceInsights reply -- what the app works out about a
+        // workspace, kept by the daemon for gavin-mcp. Two new TYPES.
+        assert_eq!(PROTOCOL_VERSION, 79);
     }
 
     #[test]
@@ -9025,6 +9085,9 @@ mod tests {
             Request::GetCardSession { workspace_id: "w".into(), path: "p".into() },
             Request::CardRuns { workspace_id: "w".into(), path: "p".into() },
             Request::ActivityRuns { workspace_id: "w".into(), since: 0, until: 1 },
+            // v79: workspace insights.
+            Request::PublishWorkspaceInsights { root_path: "/r".into(), insights: serde_json::json!({}) },
+            Request::GetWorkspaceInsights { root_path: "/r".into() },
             // v72: what a shell call wrote.
             Request::RecordShellWrites {
                 conversation_id: "c".into(),
@@ -9388,6 +9451,9 @@ mod tests {
         expected.insert(77, 8);
         // ActivityRuns -- a workspace's runs inside a time window.
         expected.insert(78, 1);
+        // PublishWorkspaceInsights, GetWorkspaceInsights -- what the app
+        // works out about a workspace, for gavin-mcp to read.
+        expected.insert(79, 2);
         expected.insert(u32::MAX, 1); // Request::Unknown
 
         assert_eq!(
@@ -9498,6 +9564,48 @@ mod tests {
             Response::ActivityRuns { runs } => assert_eq!(runs, vec![run, tool]),
             other => panic!("expected ActivityRuns, got {other:?}"),
         }
+    }
+
+    /// The insights travel opaque: whatever JSON the app published comes
+    /// back byte-for-byte equal, and the reply's two fields are optional
+    /// on the wire so "nothing published" is a reply, not a parse error.
+    #[test]
+    fn workspace_insights_round_trip_opaque_json() {
+        let insights = serde_json::json!({
+            "version": 1,
+            "lint": { "findings": [{ "code": "status-spelling", "path": "/r/a.md" }], "safeFixes": [] },
+            "setup": null,
+        });
+        let mut buf = Vec::new();
+        write_message(&mut buf, &Request::PublishWorkspaceInsights {
+            root_path: "/r".into(),
+            insights: insights.clone(),
+        })
+        .unwrap();
+        write_message(&mut buf, &Response::WorkspaceInsights {
+            insights: Some(insights.clone()),
+            published_at: Some(1_790_000_000),
+        })
+        .unwrap();
+        let mut reader = &buf[..];
+        match read_message::<_, Request>(&mut reader).unwrap().unwrap() {
+            Request::PublishWorkspaceInsights { root_path, insights: got } => {
+                assert_eq!(root_path, "/r");
+                assert_eq!(got, insights);
+            }
+            other => panic!("expected PublishWorkspaceInsights, got {other:?}"),
+        }
+        match read_message::<_, Response>(&mut reader).unwrap().unwrap() {
+            Response::WorkspaceInsights { insights: got, published_at } => {
+                assert_eq!(got, Some(insights));
+                assert_eq!(published_at, Some(1_790_000_000));
+            }
+            other => panic!("expected WorkspaceInsights, got {other:?}"),
+        }
+        let empty: Response = serde_json::from_str(r#"{"type":"WorkspaceInsights"}"#).unwrap();
+        assert!(matches!(empty, Response::WorkspaceInsights { insights: None, published_at: None }));
+        // The cap leaves room in a line for the envelope around it.
+        assert!((MAX_WORKSPACE_INSIGHTS_BYTES as u64) < MAX_LINE_BYTES);
     }
 
     /// A tool run crosses to the frontend the way a card run does, and

@@ -1659,6 +1659,10 @@ pub struct SessionManager {
     /// watcher for the root they actually chose. Locked before
     /// `gavin_watchers`, never after.
     gavin_watch_generation: Mutex<HashMap<String, u64>>,
+    /// What the app last published about each workspace (v79), by
+    /// canonical root. In memory only -- see `insights.rs` for why a
+    /// restart forgetting it is the right behaviour.
+    workspace_insights: Mutex<crate::insights::InsightsStore>,
     /// Sessions with a queued follow-up being delivered right now.
     ///
     /// Delivery is peek -> write -> take, and that middle step cannot be
@@ -2256,6 +2260,7 @@ impl SessionManager {
             session_repo_root: Mutex::new(HashMap::new()),
             gavin_watchers: Mutex::new(HashMap::new()),
             gavin_watch_generation: Mutex::new(HashMap::new()),
+            workspace_insights: Mutex::new(crate::insights::InsightsStore::default()),
             delivering_queued: Mutex::new(std::collections::HashSet::new()),
             awaiting_agent_since: Mutex::new(HashMap::new()),
             agent_announced: Mutex::new(std::collections::HashSet::new()),
@@ -4237,7 +4242,33 @@ impl SessionManager {
             generations.insert(workspace_id.to_string(), next);
             removed = self.gavin_watchers.lock().unwrap().remove(workspace_id);
         }
+        // Nobody keeps a closed workspace's insights current any more, and
+        // an agent reading them would be told about the workspace as it
+        // stood when it was closed. Kept while another watch still has the
+        // same root open, since that one's app is still the teller.
+        if let Some(watcher) = &removed {
+            if !self.watched_roots().contains(&watcher.root_path) {
+                self.workspace_insights.lock().unwrap().forget(&watcher.root_path);
+            }
+        }
         drop(removed);
+    }
+
+    /// Files what the app worked out about a workspace (v79). Confined to
+    /// a root this daemon is watching, which is also what keeps the map
+    /// as small as the set of open workspaces.
+    pub fn publish_workspace_insights(&self, root_path: &str, insights: serde_json::Value) -> anyhow::Result<()> {
+        let root = crate::gavin::confine_root_path(std::path::Path::new(root_path), &self.watched_roots())?;
+        self.workspace_insights.lock().unwrap().publish(&root, insights, crate::kanban::now_secs())
+    }
+
+    /// The last insights published for a root, and when. Not confined to a
+    /// watched root: a read of an unknown one is simply empty.
+    pub fn get_workspace_insights(&self, root_path: &str) -> (Option<serde_json::Value>, Option<i64>) {
+        match self.workspace_insights.lock().unwrap().get(std::path::Path::new(root_path)) {
+            Some(p) => (Some(p.insights.clone()), Some(p.published_at)),
+            None => (None, None),
+        }
     }
 
     pub fn gavin_tree_snapshot(&self, workspace_id: &str) -> Option<protocol::GavinTree> {
@@ -7277,6 +7308,16 @@ pub fn handle_request(manager: &SessionManager, req: Request) -> Response {
         Request::ShellWrites { conversation_id } => {
             manager.shell_writes(&conversation_id).map(|writes| Response::ShellWrites { writes })
         }
+        // Workspace insights (v79): the app publishes, an agent reads
+        // (`agent_allows` scopes the read to its own root and refuses it
+        // the publish).
+        Request::PublishWorkspaceInsights { root_path, insights } => {
+            manager.publish_workspace_insights(&root_path, insights).map(|_| Response::Ok)
+        }
+        Request::GetWorkspaceInsights { root_path } => {
+            let (insights, published_at) = manager.get_workspace_insights(&root_path);
+            Ok(Response::WorkspaceInsights { insights, published_at })
+        }
         // Scheduled tasks (v77, ADR 0010): the app's, and a Device's
         // through the desk.
         Request::ListScheduledTasks { root_path } => {
@@ -7764,6 +7805,10 @@ fn agent_allows(id: &ClientIdentity, req: &Request) -> bool {
         | Request::GetBoardByRoot { root_path }
         | Request::GetOrchestrationByRoot { root_path }
         | Request::GetToolsByRoot { root_path }
+        // What the app worked out about its own workspace (v79): the
+        // effective config and the doctor's report. A read of a snapshot,
+        // scoped like every other `*ByRoot` read.
+        | Request::GetWorkspaceInsights { root_path }
         | Request::InitGavinRoot { root_path, .. } => agent_root_in_scope(id, root_path),
         Request::SetOrchestrationByRoot { root_path, .. }
         | Request::SetRailRunByRoot { root_path, .. } => agent_root_in_scope(id, root_path),
@@ -7884,6 +7929,11 @@ fn agent_allows(id: &ClientIdentity, req: &Request) -> bool {
         // The activity calendar's read (v78): every run in a window, the
         // run history above across a whole workspace.
         | Request::ActivityRuns { .. }
+        // Publishing a workspace's insights (v79) is the app's: the
+        // snapshot is what an agent is told about its configuration, and
+        // an agent that could write it would be choosing its own
+        // diagnosis. It reads them through `GetWorkspaceInsights` above.
+        | Request::PublishWorkspaceInsights { .. }
         // What every run's shell calls wrote (v72): the Review tab's
         // read. An agent records its own and has no use for this one.
         | Request::ShellWrites { .. }
@@ -10336,6 +10386,8 @@ mod tests {
             Request::NameSession { session_id: "s".into(), name: "n".into(), agent_conversation_id: None },
             Request::CardRuns { workspace_id: "w".into(), path: "/x/a.md".into() },
             Request::GetCardSession { workspace_id: "w".into(), path: "/x/a.md".into() },
+            Request::PublishWorkspaceInsights { root_path: "/x".into(), insights: serde_json::json!({}) },
+            Request::GetWorkspaceInsights { root_path: "/x".into() },
             Request::ToolRuns { workspace_id: "w".into() },
             Request::GetProtocolVersion,
             Request::Shutdown,
@@ -15387,6 +15439,97 @@ mod tests {
     /// binding still has an agent behind it.
     fn live_session(manager: &SessionManager) -> String {
         manager.create_session("/tmp/ws", "/tmp", Some("/bin/sh"), Launch::Shell).unwrap()
+    }
+
+    // --- Workspace insights (v79) -------------------------------------
+
+    /// gavin-mcp reads its own workspace's insights and nobody else's, and
+    /// may never write them: the snapshot is the diagnosis an agent is
+    /// handed, and one it could write would be its own.
+    #[test]
+    fn an_agent_reads_its_own_workspaces_insights_and_never_publishes() {
+        let (_ws, root, _card) = workspace_with_card();
+        let (_other, other_root, _other_card) = workspace_with_card();
+        let agent = ClientIdentity::agent("sess-1", &root, &root);
+        assert!(authorize(&agent, &Request::GetWorkspaceInsights { root_path: root.clone() }, false).is_ok());
+        assert!(matches!(
+            authorize(&agent, &Request::GetWorkspaceInsights { root_path: other_root }, false),
+            Err(Response::Forbidden { role, .. }) if role == "agent"
+        ));
+        assert!(matches!(
+            authorize(
+                &agent,
+                &Request::PublishWorkspaceInsights { root_path: root, insights: serde_json::json!({}) },
+                false
+            ),
+            Err(Response::Forbidden { role, .. }) if role == "agent"
+        ));
+    }
+
+    /// The whole loop the two tools ride on: the app publishes for a root
+    /// it watches, a reader spelling the root another way gets the same
+    /// snapshot with the time it arrived, and closing the workspace takes
+    /// the snapshot with it.
+    #[test]
+    fn published_insights_read_back_until_the_workspace_is_unwatched() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        let (manager, root, _card) = manager_watching_a_card(&dir, &ws, "To Do");
+        let insights = serde_json::json!({ "version": 1, "setup": { "configured": true, "missing": [] } });
+
+        match handle_request(
+            &manager,
+            Request::PublishWorkspaceInsights { root_path: root.clone(), insights: insights.clone() },
+        ) {
+            Response::Ok => {}
+            other => panic!("expected Ok, got {other:?}"),
+        }
+        let before = crate::kanban::now_secs();
+        let respelled = format!("{root}/.");
+        match handle_request(&manager, Request::GetWorkspaceInsights { root_path: respelled }) {
+            Response::WorkspaceInsights { insights: Some(got), published_at: Some(at) } => {
+                assert_eq!(got, insights);
+                assert!(at <= before && before - at < 60, "published_at {at} vs now {before}");
+            }
+            other => panic!("expected the published insights, got {other:?}"),
+        }
+
+        manager.unwatch_gavin_root("ws-1");
+        match handle_request(&manager, Request::GetWorkspaceInsights { root_path: root }) {
+            Response::WorkspaceInsights { insights: None, published_at: None } => {}
+            other => panic!("expected nothing after the unwatch, got {other:?}"),
+        }
+    }
+
+    /// Publishing is confined to a root this daemon watches -- which is
+    /// also what bounds the map -- and the size cap holds on the wire.
+    #[test]
+    fn insights_are_refused_for_an_unwatched_root_and_past_the_size_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let (manager, root, _card) = manager_watching_a_card(&dir, &ws, "To Do");
+
+        match handle_request(
+            &manager,
+            Request::PublishWorkspaceInsights {
+                root_path: wire_spelling(elsewhere.path()),
+                insights: serde_json::json!({}),
+            },
+        ) {
+            Response::Error { message } => assert!(message.contains("not a workspace"), "{message}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        let heavy = serde_json::json!({ "blob": "x".repeat(protocol::MAX_WORKSPACE_INSIGHTS_BYTES) });
+        match handle_request(&manager, Request::PublishWorkspaceInsights { root_path: root.clone(), insights: heavy }) {
+            Response::Error { message } => assert!(message.contains("at most"), "{message}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        // Nothing was published, which is a reply rather than an error.
+        match handle_request(&manager, Request::GetWorkspaceInsights { root_path: root }) {
+            Response::WorkspaceInsights { insights: None, published_at: None } => {}
+            other => panic!("expected an empty reply, got {other:?}"),
+        }
     }
 
     // --- Scheduled tasks (v77) ----------------------------------------
