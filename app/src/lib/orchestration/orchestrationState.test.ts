@@ -317,6 +317,12 @@ vi.mock("$lib/git/gitState", () => {
     },
   };
 });
+// The Commit changes step's body in a shared checkout. Pass-through by
+// default: the tests that are about the narrowing drive it.
+vi.mock("$lib/git/sharedCommitState", () => ({
+  commitBodyForCheckout: vi.fn(async (_ws: string, _cwd: string, body: string) => body),
+}));
+import { commitBodyForCheckout } from "$lib/git/sharedCommitState";
 
 import * as backend from "$lib/core/backend";
 import * as gitStateModule from "$lib/git/gitState";
@@ -3518,6 +3524,28 @@ describe("launching a tool step", () => {
     toolRecords.set({ "ws-1": [] });
     vi.mocked(layoutStateModule.createSessionOnPage).mockResolvedValue("sess-9");
   }
+
+  // Other agents live in the rail's checkout: Commit changes commits only
+  // what the rail's own cards wrote (git/sharedCommit.ts).
+  it("hands Commit changes the body narrowed for its checkout, with the rail's own cards", async () => {
+    vi.mocked(commitBodyForCheckout).mockImplementationOnce(async (_ws, _cwd, body) => `${body}\n\nNARROWED`);
+    await railOn("builtin:commit");
+    await executeActions("ws-1", [{ kind: "launch", stepId: "t1" }]);
+    expect(commitBodyForCheckout).toHaveBeenCalledWith(
+      "ws-1",
+      "/x/wt",
+      expect.stringContaining("Commit the uncommitted work in this checkout"),
+      []
+    );
+    const command = vi.mocked(layoutStateModule.createSessionOnPage).mock.calls[0][3] as string;
+    expect(command).toContain("NARROWED");
+  });
+
+  it("leaves every other tool's body alone", async () => {
+    await railOn("builtin:push");
+    await executeActions("ws-1", [{ kind: "launch", stepId: "t1" }]);
+    expect(commitBodyForCheckout).not.toHaveBeenCalled();
+  });
 
   // What makes the session a candidate for compression, which the
   // daemon decides as it spawns it. An agent tool is an agent's launch

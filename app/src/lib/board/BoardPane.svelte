@@ -10,6 +10,7 @@
   import CardComposeModal from "$lib/cards/CardComposeModal.svelte";
   import { planCommitFromMerged } from "$lib/files/planDrop";
   import { runCard, resumeCard, developCard, sendToMainAgent } from "$lib/cards/cardRunActions";
+  import { runCardsInOwnWorktrees } from "$lib/cards/ownWorktreeRun";
   import { layoutState } from "$lib/core/layoutState";
   import { deletionPlanFor, executeDeletion, type DeletionPlan } from "$lib/cards/cardDelete";
   import { grantForAnsweredPrompt } from "$lib/core/confirmGate";
@@ -240,6 +241,14 @@
     if (err) planWriteError = err;
   }
 
+  // "Each in its own worktree" (sharedCheckout.ts): a Start all, Run all
+  // or Run selected whose cards would otherwise share one checkout.
+  async function handleRunInOwnWorktrees(cards: CardView[]): Promise<void> {
+    planWriteError = null;
+    const err = await runCardsInOwnWorktrees(workspaceId, cards);
+    if (err) planWriteError = err;
+  }
+
   const agentAvailable = $derived(
     ($layoutState.workspaces.find((w) => w.id === workspaceId)?.mainSessionId ?? null) !== null
   );
@@ -344,6 +353,7 @@
           onOpenPlanCard={(path) => (openPlanPath = path)}
           onRunCard={handleRun}
           onResumeCard={handleResume}
+          onRunInOwnWorktrees={handleRunInOwnWorktrees}
           onSendToAgent={handleSendToAgent}
           {agentAvailable}
           onDeleteCard={(card) => (pendingDelete = card)}
@@ -356,7 +366,7 @@
         <AutoKanbanColumn status={auto.status} planCards={auto.planCards} hiddenCount={view?.hiddenIn(AUTO_KEY_PREFIX + auto.status) ?? 0} labels={board.labels} {workspaceId} onOpenPlan={(path) => (openPlanPath = path)} onRunCard={handleRun} onSendToAgent={handleSendToAgent} {agentAvailable} onDeleteCard={(card) => (pendingDelete = card)} onCardContextMenu={handleCardContextMenu} />
       {/each}
     </div>
-    <BoardSelectionBar {workspaceId} {allCards} onRunCard={handleRun} />
+    <BoardSelectionBar {workspaceId} {allCards} onRunCard={handleRun} onRunInOwnWorktrees={handleRunInOwnWorktrees} />
     <KanbanDragPreview {board} {merged} labels={board.labels} root={columnsEl} />
   {/if}
   {#if composeStatus !== null && board}

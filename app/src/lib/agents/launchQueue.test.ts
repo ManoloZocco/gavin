@@ -305,6 +305,29 @@ describe("persistence", () => {
     ]);
   });
 
+  // "Each in its own worktree": a held run must come back from the wait
+  // in the checkout the confirm named, never in the shared one.
+  it("keeps a board Run's own worktree across the wait", () => {
+    const worktree = { path: "/r/.gavin-worktrees/fix-login", branch: "fix-login", from: "main" };
+    const held = JSON.stringify({ ...CARD, worktree, id: "q1", askedAtMs: 5 });
+    expect(parseLaunchQueue(`[${held}]`)).toEqual([{ ...CARD, worktree, id: "q1", askedAtMs: 5 }]);
+    const detached = JSON.stringify({ ...CARD, worktree: { ...worktree, from: null }, id: "q2", askedAtMs: 5 });
+    expect(parseLaunchQueue(`[${detached}]`)).toHaveLength(1);
+  });
+
+  it("drops a held run whose worktree does not read as one, rather than run it in the shared checkout", () => {
+    const bad = [
+      { path: "", branch: "b", from: null },
+      { path: "/p", branch: "", from: null },
+      { path: "/p", branch: "b" },
+      { path: "/p", branch: "b", from: 7 },
+      "fix-login",
+      null,
+    ];
+    const raw = JSON.stringify(bad.map((worktree, i) => ({ ...CARD, worktree, id: `q${i}`, askedAtMs: 5 })));
+    expect(parseLaunchQueue(raw)).toEqual([]);
+  });
+
   it("keeps a held clean-stale run, and drops one without its prompt", () => {
     const clean = { kind: "clean", workspaceId: "ws", label: "Clean stale tests", id: "q1", askedAtMs: 5 };
     expect(parseLaunchQueue(JSON.stringify([{ ...clean, prompt: "p" }, { ...clean, id: "q2" }]))).toEqual([

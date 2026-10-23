@@ -166,6 +166,11 @@ impl OrchestrationStore {
         // has none. Kept as its own column for the same reason
         // `trigger_rail` is -- greppable when asking why a rail armed.
         add_column_if_missing(&conn, "orch_rails", "trigger_at", "INTEGER")?;
+        // v81: the per-rail opt-in to hold the next stage on a live
+        // same-worktree conflict (lc-06), the one exception to rule O4.
+        // Nullable INTEGER like `auto_resume`, and NULL is the honest
+        // reading of every rail written before it: it never opted in.
+        add_column_if_missing(&conn, "orch_rails", "hold_on_live_conflict", "INTEGER")?;
         // v30: a tool's own working directory, for a standalone run from
         // the Tools tab. orch_tools is already live on disk in every
         // install, so the CREATE TABLE above keeps the old shape and
@@ -204,7 +209,8 @@ impl OrchestrationStore {
             .conn
             .prepare(
                 "SELECT id, name, position, worktree_path, branch, auto_resume,
-                        trigger_kind, trigger_rail, trigger_at, page_id FROM orch_rails
+                        trigger_kind, trigger_rail, trigger_at, page_id,
+                        hold_on_live_conflict FROM orch_rails
                  WHERE workspace_id = ?1 ORDER BY position",
             )?
             .query_map(params![workspace_id], |row| {
@@ -229,6 +235,8 @@ impl OrchestrationStore {
                         rail: trigger_rail,
                         at: trigger_at,
                     }),
+                    // INTEGER for the reason `auto_resume` is.
+                    hold_on_live_conflict: row.get::<_, Option<i64>>(10)?.map(|v| v != 0),
                     page_id: row.get(9)?,
                     stages: Vec::new(),
                 })
@@ -467,8 +475,9 @@ impl OrchestrationStore {
         for rail in rails {
             tx.execute(
                 "INSERT INTO orch_rails (id, workspace_id, name, position, worktree_path, branch,
-                                          auto_resume, trigger_kind, trigger_rail, trigger_at, page_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                                          auto_resume, trigger_kind, trigger_rail, trigger_at, page_id,
+                                          hold_on_live_conflict)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     rail.id,
                     workspace_id,
@@ -480,7 +489,8 @@ impl OrchestrationStore {
                     rail.trigger.as_ref().map(|t| t.kind.clone()),
                     rail.trigger.as_ref().and_then(|t| t.rail.clone()),
                     rail.trigger.as_ref().and_then(|t| t.at),
-                    rail.page_id
+                    rail.page_id,
+                    rail.hold_on_live_conflict.map(|v| i64::from(v))
                 ],
             )?;
             for stage in &rail.stages {
@@ -1114,8 +1124,20 @@ fn add_column_if_missing(
     if existing.contains_key(column) {
         return Ok(());
     }
-    conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"))?;
-    Ok(())
+    add_column(conn, table, column, decl)
+}
+
+/// The ALTER itself, with a duplicate column taken as done. The release
+/// and dev daemons share this file and both open it at startup: each can
+/// read the column as missing above and both ALTER. The one that loses
+/// gets "duplicate column name", which is the outcome it wanted, so it is
+/// not a failure to open.
+fn add_column(conn: &Connection, table: &str, column: &str, decl: &str) -> anyhow::Result<()> {
+    match conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}")) {
+        Ok(()) => Ok(()),
+        Err(e) if e.to_string().contains("duplicate column name") => Ok(()),
+        Err(e) => Err(e.into()),
+    }
 }
 
 #[cfg(test)]
@@ -1144,6 +1166,7 @@ mod tests {
             worktree_path: None,
             branch: None,
             auto_resume: None,
+            hold_on_live_conflict: None,
             trigger: None,
             page_id: None,
             stages: vec![Stage {
@@ -1447,6 +1470,7 @@ mod tests {
             worktree_path: None,
             branch: None,
             auto_resume: None,
+            hold_on_live_conflict: None,
             trigger: None,
             page_id: None,
             stages: vec![Stage {
@@ -2192,6 +2216,74 @@ mod tests {
         off.auto_resume = Some(false);
         s.replace_plan("ws-1", &[off], &[], &none()).unwrap();
         assert_eq!(s.get("ws-1").unwrap().rails[0].auto_resume, Some(false));
+    }
+
+    /// The hold opt-in rides `replace_plan` like `auto_resume` does: a
+    /// field it forgot to carry would be cleared by the next unrelated
+    /// edit to the board.
+    #[test]
+    fn a_rails_live_conflict_hold_opt_in_round_trips() {
+        let mut s = store();
+        let mut r = rail("r1", &[("t1", "/x/a.md")]);
+        r.hold_on_live_conflict = Some(true);
+        s.replace_plan("ws-1", &[r], &[], &none()).unwrap();
+        assert_eq!(s.get("ws-1").unwrap().rails[0].hold_on_live_conflict, Some(true));
+
+        let mut off = rail("r1", &[("t1", "/x/a.md")]);
+        off.hold_on_live_conflict = Some(false);
+        s.replace_plan("ws-1", &[off], &[], &none()).unwrap();
+        assert_eq!(s.get("ws-1").unwrap().rails[0].hold_on_live_conflict, Some(false));
+    }
+
+    /// The migration for v81's column, from the v80 shape -- a database
+    /// built by hand, because a fresh tempdir passes through a missing
+    /// ALTER without noticing. A rail written before the opt-in reads as
+    /// never having opted in, which is rule O4.
+    #[test]
+    fn opening_a_pre_v81_database_adds_the_hold_on_live_conflict_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("orchestration.sqlite");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE orch_rails (
+                    id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, name TEXT NOT NULL,
+                    position INTEGER NOT NULL, worktree_path TEXT, branch TEXT,
+                    auto_resume INTEGER, trigger_kind TEXT, trigger_rail TEXT,
+                    trigger_at INTEGER, page_id TEXT);
+                 INSERT INTO orch_rails VALUES
+                    ('r1','ws-1','backend',0,'/x/wt',NULL,1,NULL,NULL,NULL,NULL);",
+            )
+            .unwrap();
+        }
+        let mut s = OrchestrationStore::open(&path).unwrap();
+        let back = s.get("ws-1").unwrap().rails[0].clone();
+        assert_eq!(back.hold_on_live_conflict, None, "a v80 rail never opted in");
+        assert_eq!(back.auto_resume, Some(true), "and keeps what it did carry");
+
+        // A write after the migration stores the opt-in.
+        let mut held = rail("r1", &[("t1", "/x/a.md")]);
+        held.hold_on_live_conflict = Some(true);
+        s.replace_plan("ws-1", &[held], &[], &none()).unwrap();
+        assert_eq!(s.get("ws-1").unwrap().rails[0].hold_on_live_conflict, Some(true));
+
+        // Idempotent: the ALTERs run on every open.
+        drop(s);
+        assert!(OrchestrationStore::open(&path).is_ok());
+    }
+
+    /// Two daemons opening one file race on the ALTER; the loser's
+    /// duplicate-column error is the outcome it wanted.
+    #[test]
+    fn adding_a_column_that_appeared_meanwhile_is_not_an_error() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE t (id TEXT); ALTER TABLE t ADD COLUMN c INTEGER;").unwrap();
+        // What the losing daemon runs after it read the column as missing.
+        let err = conn.execute_batch("ALTER TABLE t ADD COLUMN c INTEGER").unwrap_err();
+        assert!(err.to_string().contains("duplicate column name"), "{err}");
+        assert!(add_column(&conn, "t", "c", "INTEGER").is_ok());
+        // Any other failure still fails.
+        assert!(add_column(&conn, "no_such_table", "c", "INTEGER").is_err());
     }
 
     /// The budget is the one run field written by a LATER transition than

@@ -120,6 +120,13 @@ vi.mock("$lib/core/layoutState", () => ({
   // which is the only thing that tells the two calls apart.
   agentForCard: agentMock,
   agentForProfile: agentMock,
+  // Whether `[worktree] setup` may run in a worktree a board Run cuts.
+  configTrustFor: vi.fn(() => ({ trusted: true })),
+}));
+// The two git actions a board Run in a worktree of its own takes.
+vi.mock("$lib/git/gitState", () => ({
+  forkWorktree: vi.fn(async () => ({ ok: true })),
+  discardWorktrees: vi.fn(async () => true),
 }));
 // The interactive half of the same gate. A real `ensureCardReviewed`
 // would raise the app's dialog and wait for an answer that never comes;
@@ -148,11 +155,12 @@ vi.mock("$lib/core/workspace", () => {
 
 import * as backend from "$lib/core/backend";
 import { handleAgentSessionSpawned, setSessionName, switchToSessionInPage, switchWorkspaceView, layoutState, daemonCompat, workspaceRootPath, resolvedAgentFor, agentForCard, conversationIdForLaunch, baseShaForLaunch, armFailureDetection, setDevelopingCards, profileIdForLaunch, promptExtrasFor } from "$lib/core/layoutState";
-import { cardReviewed } from "$lib/core/layoutState";
+import { cardReviewed, configTrustFor } from "$lib/core/layoutState";
 import { ensureCardReviewed } from "$lib/cards/cardReviewActions";
 import { findSessionLocation } from "$lib/core/workspace";
 import { kanbanState } from "$lib/board/kanbanState";
-import { gavinTrees } from "$lib/core/gavinState";
+import { gavinTrees, worktreeSetups } from "$lib/core/gavinState";
+import { forkWorktree, discardWorktrees } from "$lib/git/gitState";
 import {
   runCard,
   resumeCard,
@@ -163,6 +171,7 @@ import {
   jumpToBoundSession,
   sendToMainAgent,
   pasteToMainAgent,
+  launchQueuedCard,
 } from "$lib/cards/cardRunActions";
 import { NOTHING_TO_REPLAY } from "$lib/board/kanban";
 import { EMPTY_DIRECT_PROMPT, FOREIGN_RELAUNCH_COMMAND, relaunchNote, shellQuote } from "$lib/cards/cardRun";
@@ -2370,5 +2379,190 @@ describe("attachments gate the run", () => {
     expect(err).toContain("no root folder");
     expect(backend.attachmentStatus).not.toHaveBeenCalled();
     expect(backend.createSession).not.toHaveBeenCalled();
+  });
+});
+
+// "Each in its own worktree" (sharedCheckout.ts): the ordinary board Run,
+// with only its checkout changed -- cut after every gate, set up, and
+// undone if the agent never starts.
+describe("a board Run in a worktree of its own", () => {
+  const WT = { path: "/ws/.gavin-worktrees/fix-login", branch: "fix-login", from: "main" };
+  const TASK_FILE = {
+    content: "---\nkind: task\ntitle: Fix login\nstatus: To Do\n---\nDo the thing.\n",
+    truncated: false,
+    exists: true,
+  };
+
+  beforeEach(() => {
+    vi.mocked(workspaceRootPath).mockReturnValue("/ws");
+    vi.mocked(backend.readFileForViewer).mockResolvedValue(TASK_FILE);
+    vi.mocked(backend.createSession).mockResolvedValue("s-9");
+    vi.mocked(backend.linkCardSession).mockResolvedValue(undefined);
+    vi.mocked(backend.setPlanFrontmatterField).mockImplementation(async (p) => p);
+    vi.mocked(forkWorktree).mockResolvedValue({ ok: true } as never);
+    vi.mocked(configTrustFor).mockReturnValue({ trusted: true } as never);
+    worktreeSetups.set({ "ws-1": ["npm ci"] });
+  });
+
+  it("forks the named branch, then starts the agent there after its setup", async () => {
+    expect(await runCard("ws-1", card("task", "To Do"), undefined, WT)).toBeNull();
+
+    expect(forkWorktree).toHaveBeenCalledWith("ws-1", {
+      path: WT.path,
+      branch: "fix-login",
+      from: "main",
+      newBranch: true,
+    });
+    const [cwd, line] = vi.mocked(backend.createSession).mock.calls[0];
+    expect(cwd).toBe(WT.path);
+    expect(line?.startsWith("npm ci && claude --model opus '")).toBe(true);
+    // Status first, worktree second: the order a refused launch relies on.
+    expect(vi.mocked(backend.setPlanFrontmatterField).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(forkWorktree).mock.invocationCallOrder[0]
+    );
+  });
+
+  it("tells the agent the card lives in the root checkout, not its copy", async () => {
+    await runCard("ws-1", card("task", "To Do"), undefined, WT);
+    const [, line] = vi.mocked(backend.createSession).mock.calls[0];
+    expect(line).toContain("This card lives at /ws/.gavin-root/plans/t.md and nowhere else.");
+  });
+
+  it("binds the card to the worktree, with the launch replayable without its setup", async () => {
+    await runCard("ws-1", card("task", "To Do"), undefined, WT);
+    const linked = JSON.stringify(vi.mocked(backend.linkCardSession).mock.calls[0]);
+    expect(linked).toContain(WT.path);
+    expect(linked).not.toContain("npm ci");
+  });
+
+  it("runs no setup the workspace has not trusted", async () => {
+    vi.mocked(configTrustFor).mockReturnValue({ trusted: false } as never);
+    await runCard("ws-1", card("task", "To Do"), undefined, WT);
+    const [, line] = vi.mocked(backend.createSession).mock.calls[0];
+    expect(line?.startsWith("claude --model opus '")).toBe(true);
+  });
+
+  it("refuses with git's reason when the worktree cannot be cut, and starts nothing", async () => {
+    vi.mocked(forkWorktree).mockResolvedValue({ ok: false, error: "fatal: 'fix-login' already exists" } as never);
+    expect(await runCard("ws-1", card("task", "To Do"), undefined, WT)).toBe(
+      "Couldn't create the worktree for Fix login — fatal: 'fix-login' already exists"
+    );
+    expect(backend.createSession).not.toHaveBeenCalled();
+  });
+
+  it("removes the worktree again when the agent will not start", async () => {
+    vi.mocked(backend.createSession).mockRejectedValue(new Error("no pty"));
+    expect(await runCard("ws-1", card("task", "To Do"), undefined, WT)).toBe("Couldn't start the agent: no pty");
+    expect(discardWorktrees).toHaveBeenCalledWith("ws-1", [{ path: WT.path, branch: "fix-login" }], true);
+  });
+
+  it("cuts nothing for a card the human declines at its review", async () => {
+    vi.mocked(cardReviewed).mockReturnValue(false);
+    vi.mocked(ensureCardReviewed).mockResolvedValue(false);
+    expect(await runCard("ws-1", card("task", "To Do"), undefined, WT)).toBeNull();
+    expect(forkWorktree).not.toHaveBeenCalled();
+  });
+
+  it("carries the worktree into a held launch's intent, and cuts nothing yet", async () => {
+    const hold = vi.fn(() => ({ go: false as const, error: null }));
+    const host = { jump: async () => "none" as const, hold, place: vi.fn() };
+    expect(await runCard("ws-1", card("task", "To Do"), host, WT)).toBeNull();
+    expect(hold).toHaveBeenCalledWith(expect.objectContaining({ kind: "card", mode: "run", worktree: WT }));
+    expect(forkWorktree).not.toHaveBeenCalled();
+  });
+
+  it("comes back from the queue still bound for its own worktree", async () => {
+    gavinTrees.set({
+      "ws-1": {
+        rootPath: "/ws",
+        contexts: [
+          {
+            name: "root",
+            folderPath: "/ws",
+            plans: [
+              {
+                path: "/ws/.gavin-root/plans/t.md",
+                title: "Fix login",
+                kind: "task",
+                status: "To Do",
+                priority: null,
+                order: null,
+                parent: null,
+                labels: [],
+                checklistDone: 0,
+                checklistTotal: 0,
+                fileName: "t.md",
+                parseWarning: false,
+              },
+            ],
+          },
+        ],
+      },
+    } as never);
+    await launchQueuedCard({
+      id: "q1",
+      kind: "card",
+      workspaceId: "ws-1",
+      label: "Fix login",
+      askedAtMs: 1,
+      cardPath: "/ws/.gavin-root/plans/t.md",
+      mode: "run",
+      automatic: false,
+      worktree: WT,
+    });
+    expect(forkWorktree).toHaveBeenCalledWith("ws-1", expect.objectContaining({ path: WT.path, branch: WT.branch }));
+    expect(vi.mocked(backend.createSession).mock.calls[0][0]).toBe(WT.path);
+  });
+
+  it("never moves a resume, whatever its queued intent says", async () => {
+    kanbanState.set({
+      "ws-1": board([{ path: "/ws/.gavin-root/plans/t.md", sessionId: "s-old", cwd: "/ws", launchCwd: "/ws" }]),
+    });
+    gavinTrees.set({
+      "ws-1": {
+        rootPath: "/ws",
+        contexts: [
+          {
+            name: "root",
+            folderPath: "/ws",
+            plans: [
+              {
+                path: "/ws/.gavin-root/plans/t.md",
+                title: "Fix login",
+                kind: "task",
+                status: "In Progress",
+                priority: null,
+                order: null,
+                parent: null,
+                labels: [],
+                checklistDone: 0,
+                checklistTotal: 0,
+                fileName: "t.md",
+                parseWarning: false,
+              },
+            ],
+          },
+        ],
+      },
+    } as never);
+    await launchQueuedCard({
+      id: "q1",
+      kind: "card",
+      workspaceId: "ws-1",
+      label: "Fix login",
+      askedAtMs: 1,
+      cardPath: "/ws/.gavin-root/plans/t.md",
+      mode: "resume",
+      automatic: false,
+      worktree: WT,
+    });
+    expect(forkWorktree).not.toHaveBeenCalled();
+    expect(vi.mocked(backend.createSession).mock.calls[0][0]).toBe("/ws");
+  });
+
+  it("an ordinary Run cuts nothing and runs in the card's own folder", async () => {
+    await runCard("ws-1", card("task", "To Do"));
+    expect(forkWorktree).not.toHaveBeenCalled();
+    expect(vi.mocked(backend.createSession).mock.calls[0][0]).toBe("/ws");
   });
 });

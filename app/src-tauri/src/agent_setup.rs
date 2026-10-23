@@ -114,6 +114,11 @@ impl ResolvedMcp {
         self.format
     }
 
+    /// The server's key in that file -- `gavin` for every profile.
+    pub(crate) fn server_key(&self) -> &'static str {
+        self.server_key
+    }
+
     /// Where a step skill this profile does not already install would go:
     /// the parent every installed skill shares, and the filename they all
     /// use. Taken from the first entry because that is the shape an
@@ -297,7 +302,7 @@ pub(crate) fn contained_dest(root: &Path, rel: &Path) -> anyhow::Result<PathBuf>
 
 /// `contained_dest` without creating missing parents — for a check that
 /// must not mkdir (validating `[agent] file` before a write).
-fn check_contained_dest(root: &Path, rel: &Path) -> anyhow::Result<PathBuf> {
+pub(crate) fn check_contained_dest(root: &Path, rel: &Path) -> anyhow::Result<PathBuf> {
     contained_dest_inner(root, rel, false)
 }
 
@@ -2131,7 +2136,7 @@ pub(crate) fn resolve_mcp_binary_path() -> anyhow::Result<PathBuf> {
 /// gavin's own committed launcher, named by the config files RELATIVE to
 /// the workspace root. Forward slash on both platforms: it is a config
 /// value, not a path built here, and Windows accepts it.
-const MCP_LAUNCHER: &str = "scripts/gavin-mcp";
+pub(crate) const MCP_LAUNCHER: &str = "scripts/gavin-mcp";
 
 /// The file the launcher command actually spawns.
 ///
@@ -2145,7 +2150,7 @@ const MCP_LAUNCHER: &str = "scripts/gavin-mcp";
 /// which is not this process for an ssh workspace -- the agent and its
 /// `gavin-mcp` are on the host. `WorkspaceFiles::is_windows` answers it
 /// for whichever disk the root is on.
-fn launcher_file(root: &Path, windows: bool) -> PathBuf {
+pub(crate) fn launcher_file(root: &Path, windows: bool) -> PathBuf {
     let name = if windows { "gavin-mcp.cmd" } else { "gavin-mcp" };
     root.join("scripts").join(name)
 }
@@ -4239,7 +4244,7 @@ pub fn agent_profiles() -> Vec<AgentProfileDto> {
 
 /// One row of the init-wizard PATH sweep: every built-in profile whose
 /// default command is non-empty, plus whether that command resolves.
-#[derive(serde::Serialize, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DetectedAgentDto {
     pub id: String,

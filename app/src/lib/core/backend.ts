@@ -19,6 +19,8 @@ import type { GitStatus, RemovedWorkspace, Workspace, WorkspacesData } from "$li
 import type { Board, CardSessionRecord, Column, Label } from "$lib/board/kanban";
 import type { AgentSkillsMark, AgentSkillsStatus } from "$lib/agents/agentSkills";
 import type { PlaywrightStatus } from "$lib/agents/playwrightSetup";
+import type { McpHealth } from "$lib/workspace/setupWizard";
+import type { PreflightItem } from "$lib/agents/prerequisites";
 import type { BrowserFrame, DeviceBrowserWatch, LiveBrowser } from "$lib/panes/browserView";
 import type { MemoryIndexStatus } from "$lib/cards/memoryIndex";
 import type { GavinTracking } from "$lib/git/gitTracking";
@@ -1182,6 +1184,10 @@ export interface SessionBaseline {
   compressed?: boolean;
   uncompressedReason?: string | null;
   headroomReach?: string | null;
+  /// An agent session with no gavin_* tools (v81): the daemon's grace ran
+  /// out with no Hello from its gavin-mcp. Absent from an older host,
+  /// which never looks -- and that reads as no mark (toolsMissing.ts).
+  toolsMissing?: boolean;
 }
 
 /// Every live session on every daemon, and which linked ssh hosts those
@@ -1350,6 +1356,15 @@ export function scanForeignMcpServers(
   profileId?: string
 ): Promise<ForeignMcpServer[]> {
   return invoke("scan_foreign_mcp_servers", { rootPath, profileId });
+}
+
+/// Whether the workspace's MCP config carries gavin's entry and its
+/// command would start (lc-03) -- what the Integration step counts as
+/// done. `runnable: null` for an ssh workspace, whose binary is on the
+/// host. `profileId` absent asks about the profile the root resolves to,
+/// the one `setupAgentIntegration` would write.
+export function mcpHealth(rootPath: string, profileId?: string): Promise<McpHealth> {
+  return invoke("mcp_health", { rootPath, profileId });
 }
 
 export function createPlan(
@@ -1535,6 +1550,16 @@ export function cardRuns(workspaceId: string, path: string): Promise<CardRun[]> 
 /// workspace) before calling: an older daemon refuses the request.
 export function activityRuns(workspaceId: string, since: number, until: number): Promise<ActivityRun[]> {
   return invoke("activity_runs", { workspaceId, since, until });
+}
+
+/// Hands the daemon what the app works out about one workspace (v79,
+/// `workspace/workspaceInsights.ts` builds it) so gavin-mcp's
+/// `gavin_get_effective_config` and `gavin_doctor` can read it. The host
+/// takes the root from the workspace record and routes an ssh workspace
+/// to its host. Gate on FEATURE_MIN_VERSION.workspaceInsights
+/// (`sshInsightsBlocked` for an ssh workspace) before calling.
+export function publishWorkspaceInsights(workspaceId: string, insights: unknown): Promise<void> {
+  return invoke("publish_workspace_insights", { workspaceId, insights });
 }
 
 /// What one run cost, read out of the agent CLI's own transcript by the
@@ -1756,6 +1781,13 @@ export function detectAgentBinaries(): Promise<
   }>
 > {
   return invoke("detect_agent_binaries");
+}
+
+/// Every prerequisite at once -- git, Node, uv, Git for Windows' sh.exe
+/// on Windows, and each agent CLI started with `--version` (lc-09).
+/// Takes up to a few seconds: the probes run on the host's blocking pool.
+export function preflight(): Promise<PreflightItem[]> {
+  return invoke("preflight");
 }
 
 /// The models each agent CAN be given right now, keyed by profile id --
@@ -2074,6 +2106,24 @@ export function gitWorktreePrune(cwd: string): Promise<void> {
 /// no protocol version and no compat gate to work.
 export function worktreeSetup(rootPath: string): Promise<string[]> {
   return invoke("worktree_setup", { rootPath });
+}
+
+/// What a `[worktree] setup` write did: whether config.toml changed, and
+/// the lines it declares now.
+export interface WorktreeSetupWrite {
+  written: boolean;
+  lines: string[];
+}
+
+/// Writes `[worktree] setup` through the daemon (v80). `onlyIfAbsent`
+/// leaves a declared value alone; the Settings editor sends false. Gate
+/// on FEATURE_MIN_VERSION.worktreeSetupEditor first.
+export function setWorktreeSetup(
+  rootPath: string,
+  lines: string[],
+  onlyIfAbsent: boolean
+): Promise<WorktreeSetupWrite> {
+  return invoke("set_worktree_setup", { rootPath, lines, onlyIfAbsent });
 }
 
 // --- Git tab SP4: history ---------------------------------------------------

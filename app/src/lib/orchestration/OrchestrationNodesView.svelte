@@ -29,6 +29,7 @@
   } from "$lib/orchestration/orchestration";
   import {
     attentionTip,
+    retryLabel,
     numbersForStep,
     railAttention,
     railStateOf,
@@ -154,7 +155,9 @@
     if (tool && tool.params.length > 0) {
       entries.push({ label: "Tool parameters…", onPick: () => onEditStepParams(r.stepId) });
     }
-    if (state === "stalled") entries.push({ label: "Retry", onPick: () => onRetryStep(r.stepId) });
+    if (state === "stalled") {
+      entries.push({ label: retryLabel(attentions.get(r.stepId)), onPick: () => onRetryStep(r.stepId) });
+    }
     if (state === "running" || state === "stalled") {
       entries.push({ label: "Mark done", onPick: () => onMarkStepDone(r.stepId) });
       entries.push({ label: "Skip and proceed", onPick: () => onSkipStep(r.stepId) });

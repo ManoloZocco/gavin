@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { source } from "$lib/sources";
+import { SETUP_STEP_LABELS } from "$lib/workspace/setupWizard";
 
 // Git tracking is one question asked on five surfaces -- the sidebar's
 // "Initialize gavin here?" prompt, the Settings tab's own init modal, the
@@ -40,7 +41,9 @@ describe("the sidebar's initialize prompt", () => {
 describe("the wizard", () => {
   it("draws the Git step in the stepper and renders it", () => {
     const text = source(WIZARD);
-    expect(text).toContain('{ id: "git", label: "Git" }');
+    // The stepper is drawn from SETUP_STEPS and its labels (setupWizard.ts).
+    expect(text).toContain("SETUP_STEPS.map((id) => ({");
+    expect(SETUP_STEP_LABELS.git).toBe("Git");
     expect(text).toContain('{:else if current === "git"}');
     expect(text).toContain("<GitStep {workspaceId} onDone={advance} />");
   });

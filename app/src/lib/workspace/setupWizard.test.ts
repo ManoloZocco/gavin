@@ -8,6 +8,13 @@ import {
   playwrightStepSettled,
   PRD_PLACEHOLDERS,
   SETUP_STEPS,
+  SETUP_STEP_LABELS,
+  NAGGED_STEPS,
+  setupBannerText,
+  integrationHealthNote,
+  integrationStepDone,
+  MCP_HEALTH_READING,
+  type McpHealth,
 } from "$lib/workspace/setupWizard";
 import type { AgentSkillsStatus } from "$lib/agents/agentSkills";
 import type { HeadroomStatus } from "$lib/agents/compression";
@@ -175,6 +182,77 @@ describe("setupProgress", () => {
     ).toEqual(["integration"]);
   });
 
+  describe("with the host's MCP health check", () => {
+    const MARKED = "x\n<!-- gavin:start -->\ny\n";
+    const health = (over: Partial<McpHealth>): McpHealth => ({
+      entryPresent: true,
+      command: "/Applications/Gavin.app/Contents/MacOS/gavin-mcp",
+      runnable: true,
+      reason: null,
+      configFile: ".mcp.json",
+      ...over,
+    });
+    const DEAD = health({ runnable: false, reason: "/Applications/Gavin.app/Contents/MacOS/gavin-mcp does not exist" });
+
+    it("counts integration only when the entry is there and its command starts", () => {
+      expect(setupProgress({ ...NOTHING_DONE, agentFileBody: MARKED, mcpHealth: health({}) }).done).toEqual([
+        "integration",
+      ]);
+      expect(setupProgress({ ...NOTHING_DONE, agentFileBody: MARKED, mcpHealth: DEAD }).done).toEqual([]);
+      expect(setupProgress({ ...ALL_DONE, mcpHealth: DEAD }).configured).toBe(false);
+      expect(setupProgress({ ...ALL_DONE, mcpHealth: DEAD }).missing).toEqual(["integration"]);
+    });
+
+    it("still needs the marker block when the entry is healthy", () => {
+      expect(setupProgress({ ...NOTHING_DONE, agentFileBody: "# mine\n", mcpHealth: health({}) }).done).toEqual([]);
+    });
+
+    it("counts a missing entry as not done", () => {
+      const missing = health({ entryPresent: false, command: null, runnable: false, reason: ".mcp.json has no gavin entry" });
+      expect(setupProgress({ ...NOTHING_DONE, agentFileBody: MARKED, mcpHealth: missing }).done).toEqual([]);
+    });
+
+    // An ssh workspace's binary is on the host, and a profile with no MCP
+    // file has nothing to check: unable to look is not dead.
+    it("falls back to the marker rule when the host cannot tell", () => {
+      const unknown = health({ entryPresent: false, command: null, runnable: null, reason: "on the host" });
+      expect(setupProgress({ ...NOTHING_DONE, agentFileBody: MARKED, mcpHealth: unknown }).done).toEqual([
+        "integration",
+      ]);
+    });
+
+    it("is pending while the check is out, and not when the caller never asks", () => {
+      expect(setupProgress({ ...ALL_DONE, mcpHealth: MCP_HEALTH_READING }).pending).toBe(true);
+      expect(setupProgress(ALL_DONE).pending).toBe(false);
+      expect(setupProgress({ ...ALL_DONE, mcpHealth: health({}) }).pending).toBe(false);
+    });
+
+    it("says what is wrong with an entry that will not start, and how the button fixes it", () => {
+      expect(integrationHealthNote(undefined)).toBeNull();
+      expect(integrationHealthNote(MCP_HEALTH_READING)).toBeNull();
+      expect(integrationHealthNote(health({}))).toBeNull();
+      expect(integrationHealthNote(health({ runnable: null }))).toBeNull();
+      const dead = integrationHealthNote(DEAD) ?? "";
+      expect(dead).toContain(".mcp.json");
+      expect(dead).toContain("does not exist");
+      expect(dead).toContain("Set up integration");
+      const launcher = integrationHealthNote(
+        health({ command: "scripts/gavin-mcp", runnable: false, reason: "scripts/gavin-mcp finds no gavin-mcp binary" })
+      );
+      expect(launcher).toContain("finds no gavin-mcp binary");
+      expect(launcher).not.toContain("Set up integration");
+      expect(
+        integrationHealthNote(health({ entryPresent: false, command: null, runnable: false, reason: "x" }))
+      ).toContain("without gavin's tools");
+    });
+
+    it("integrationStepDone reads the same rule", () => {
+      expect(integrationStepDone(MARKED, undefined)).toBe(true);
+      expect(integrationStepDone(MARKED, DEAD)).toBe(false);
+      expect(integrationStepDone(null, health({}))).toBe(false);
+    });
+  });
+
   it("counts the PRD when at least one placeholder is gone", () => {
     expect(setupProgress(NOTHING_DONE).done).toEqual([]);
     const oneFilled = TEMPLATE.replace(PRD_PLACEHOLDERS.vision, "A terminal workspace.");
@@ -219,6 +297,25 @@ describe("setupProgress", () => {
 
   it("is not configured without a root", () => {
     expect(setupProgress({ ...ALL_DONE, hasRoot: false }).configured).toBe(false);
+  });
+
+  // The banner used to say "N of 10" while `configured` ignored five of
+  // the ten, so "5 of 10 done" could mean nothing was left. It counts the
+  // steps that gate `configured` now, and names the ones still missing.
+  it("counts and names only the steps `configured` waits on", () => {
+    expect(NAGGED_STEPS).toEqual(["agent", "integration", "agentSkills", "playwright", "prd"]);
+    expect(setupProgress(ALL_DONE).missing).toEqual([]);
+    expect(setupProgress({ ...ALL_DONE, hasRoot: false }).missing).toEqual(NAGGED_STEPS);
+    const p = setupProgress({ ...ALL_DONE, configCommand: null, prdBody: TEMPLATE });
+    expect(p.missing).toEqual(["agent", "prd"]);
+    expect(setupBannerText(p)).toBe("3 of 5 done — still to do: Agent, PRD");
+  });
+
+  it("keeps `missing` and `configured` the same answer", () => {
+    for (const input of [ALL_DONE, NOTHING_DONE, { ...ALL_DONE, prdBody: TEMPLATE }]) {
+      const p = setupProgress(input);
+      expect(p.configured).toBe(p.missing.length === 0);
+    }
   });
 
   // Which field the banner reads IS the fix: `complete` puts a live
@@ -377,16 +474,16 @@ describe("setupProgress", () => {
   // `next` disagree about where Headroom is.
   it("draws the wizard's stepper from the same steps, Headroom included", () => {
     const wizard = SOURCES["SetupWizard.svelte"];
-    const ids = [...wizard.matchAll(/\{ id: "([a-zA-Z]+)", label: "[^"]+" \}/g)].map((m) => m[1]);
-    expect(ids).toEqual(SETUP_STEPS);
+    expect(wizard).toContain("SETUP_STEPS.map((id) => ({");
+    expect(Object.keys(SETUP_STEP_LABELS)).toEqual(SETUP_STEPS);
     expect(wizard).toContain('current === "headroom"');
     expect(wizard).toContain("headroomAsked: Boolean(ws?.headroomAsked)");
     const home = SOURCES["HomeHubView.svelte"];
-    expect(home).toContain("{SETUP_STEPS.length}");
+    expect(home).toContain("{setupBannerText(setup)}");
     expect(home).toContain("headroomAsked: Boolean(ws?.headroomAsked)");
     expect(home).toContain("headroomReading: headroom,");
     // And the Memory step, named on both surfaces.
-    expect(wizard).toContain('{ id: "memory", label: "Memory" }');
+    expect(SETUP_STEP_LABELS.memory).toBe("Memory");
     expect(wizard).toContain('current === "memory"');
     expect(wizard).toContain("<MemoryStep");
     expect(wizard).toContain("memoryReading: memory,");
@@ -394,7 +491,7 @@ describe("setupProgress", () => {
     expect(home).toContain("memoryReading: memory,");
     expect(home).toContain("memorySkipped,");
     // And Playwright's, on both.
-    expect(wizard).toContain('{ id: "playwright", label: "Playwright" }');
+    expect(SETUP_STEP_LABELS.playwright).toBe("Playwright");
     expect(wizard).toContain('current === "playwright"');
     expect(wizard).toContain("<PlaywrightStep");
     for (const src of [wizard, home]) {

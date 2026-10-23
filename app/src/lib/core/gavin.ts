@@ -63,6 +63,10 @@ export interface PlanFileInfo {
   checklistDone: number;
   checklistTotal: number;
   parseWarning: boolean;
+  /// What `parseWarning` stands for, one line per field the daemon could
+  /// not read ("priority: `hgih` is not ..."). Absent from an older
+  /// daemon, and from a clean card.
+  parseWarnings?: string[];
   // The card file's mtime, in whole seconds since the unix epoch. The
   // archive grid orders by it. Optional so fixtures and older daemons
   // (which never send it) stay valid -- absent sorts last.

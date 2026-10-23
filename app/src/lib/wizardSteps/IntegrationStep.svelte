@@ -16,6 +16,7 @@
     runIntegration,
   } from "$lib/workspace/mcpServerTrust";
   import McpForeignChooser from "$lib/workspace/McpForeignChooser.svelte";
+  import { integrationHealthNote, type McpHealthReading } from "$lib/workspace/setupWizard";
 
   interface Props {
     workspaceId: string;
@@ -29,8 +30,13 @@
     /// agent. Fallback arming sets it so Integration cannot rewrite the
     /// workspace profile.
     profileId?: string;
+    /// The host's check of the MCP entry this step writes (lc-03), when
+    /// the caller asked for one. An entry that will not start is said
+    /// here, above the button that rewrites it.
+    health?: McpHealthReading;
   }
-  let { workspaceId, onDone, instructionsFile, profileId }: Props = $props();
+  let { workspaceId, onDone, instructionsFile, profileId, health }: Props = $props();
+  const healthNote = $derived(integrationHealthNote(health));
 
   const ws = $derived($layoutState.workspaces.find((w) => w.id === workspaceId) ?? null);
   // The file gavin's marker block goes into. Through the same resolution
@@ -104,6 +110,10 @@
   Teaches your agent about this workspace. Safe to re-run — hand-written content outside gavin's
   markers is never touched.
 </p>
+
+{#if healthNote && !result && !pendingForeign}
+  <p class="warn">{healthNote}</p>
+{/if}
 
 {#if pendingForeign}
   <McpForeignChooser

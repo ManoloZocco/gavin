@@ -264,6 +264,9 @@ const CLASSIFICATION: Record<string, [Bucket, string?]> = {
   card_session: ["ordinary"],
   card_runs: ["ordinary"],
   activity_runs: ["ordinary"],
+  // Hands the daemon the app's own snapshot of a workspace for gavin-mcp
+  // to read. Replaces the last one; removes nothing.
+  publish_workspace_insights: ["ordinary"],
   // A read: what the shell-write hook recorded of one run's shell calls,
   // for the Review tab. Writes nothing.
   shell_writes: ["ordinary"],
@@ -335,6 +338,7 @@ const CLASSIFICATION: Record<string, [Bucket, string?]> = {
   unlink_card_session: ["ordinary"],
   promote_checklist_item: ["ordinary"],
   set_root_config_field: ["ordinary"],
+  set_worktree_setup: ["ordinary"],
   get_agent_model_defaults: ["ordinary"],
   set_agent_model_default: ["ordinary"],
   get_agent_skills_marks: ["ordinary"],
@@ -371,6 +375,12 @@ const CLASSIFICATION: Record<string, [Bucket, string?]> = {
   agent_profiles: ["ordinary"],
   // A read: which agent CLIs resolve on PATH. It spawns none of them.
   detect_agent_binaries: ["ordinary"],
+  // Reads. mcp_health reads one MCP config and walks PATH; preflight
+  // starts git, node, uv and the agent CLIs the sweep found -- the stock
+  // profiles' binaries, never a command a repository named -- with
+  // `--version` only.
+  mcp_health: ["ordinary"],
+  preflight: ["ordinary"],
   agent_model_catalog: ["ordinary"],
   agent_usage: ["ordinary"],
   pr_status: ["ordinary"],

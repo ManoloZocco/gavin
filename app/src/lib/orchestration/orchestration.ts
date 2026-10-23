@@ -10,6 +10,7 @@ import type { SessionStatus } from "$lib/core/notifications";
 import { isArchivedCard, planKey, slugStatus } from "$lib/core/planBoard";
 import { isPrStep, isUntilStep, stepBefore, summaryParam, untilMax, untilVerdict } from "$lib/orchestration/orchestrationLoop";
 import { isUnreviewedStall } from "$lib/cards/cardReview";
+import { isLiveConflictHoldStall, liveConflictHold } from "$lib/orchestration/liveConflictHold";
 import { prKey, prRequirement, prWaitVerdict } from "$lib/git/pullRequest";
 import type { PrReport } from "$lib/git/pullRequest";
 import { critiqueSessionsComplete } from "$lib/review/criticalReview";
@@ -157,6 +158,12 @@ export interface Rail {
   /// the human's, the same objection `autoResume` answers with consent in
   /// advance.
   trigger?: RailTrigger | null;
+  /// Whether this rail's next launch waits while a LIVE same-worktree
+  /// conflict with other rails' running agents involves it, until the
+  /// human confirms (v81, lc-06; liveConflictHold.ts). The one opt-in
+  /// exception to rule O4. Absent, null and false all mean no -- which is
+  /// O4, and every rail written before the field.
+  holdOnLiveConflict?: boolean | null;
   /// Workspace page its sessions land on. Null until the rail's FIRST
   /// LAUNCH, whichever way the rail was armed -- Start, a run row written
   /// to the daemon socket, one adopted across a restart. That launch
@@ -1206,6 +1213,16 @@ export type VerdictsBySession = ReadonlyMap<string, TurnVerdictEntry>;
 /// emission, for every workspace at once.
 const NO_VERDICTS: VerdictsBySession = new Map();
 
+/// What `nextActions` needs to apply a rail's live-conflict hold.
+export interface LiveConflictInput {
+  conflicts: readonly Conflict[];
+  acknowledged: ReadonlySet<string>;
+}
+
+/// No conflicts and nothing confirmed: rule O4, for every caller that
+/// does not pass them.
+const NO_LIVE_CONFLICTS: LiveConflictInput = { conflicts: [], acknowledged: new Set() };
+
 export type StepAttention =
   | "asking"
   | "turn-ended"
@@ -1213,7 +1230,12 @@ export type StepAttention =
   | "failed"
   | "decoy-edit"
   | "review"
-  | "unreviewed";
+  | "unreviewed"
+  /// A step the rail's own opt-in held back because other rails have
+  /// agents running in its checkout (liveConflictHold.ts). Like
+  /// `unreviewed`, a STALLED step that never launched: nothing but the
+  /// human's confirmation releases it.
+  | "live-conflict";
 
 /// How long a turn has to have been over before `turn-ended` becomes
 /// `stale`.
@@ -1264,6 +1286,11 @@ const ATTENTION_RANK: Record<StepAttention, number> = {
   "decoy-edit": 6,
   stale: 5,
   review: 4,
+  // Between the two gates, for the reason both sit under the faults:
+  // certain, nothing but a person ends it, and not a break. Under
+  // `review` because a rail asked for that gate itself; over `unreviewed`
+  // because confirming is one press and reading a card body is not.
+  "live-conflict": 3.5,
   unreviewed: 3,
   asking: 2,
   "turn-ended": 1,
@@ -1337,7 +1364,12 @@ export function stepAttentions(
         // StepRun would be a protocol bump for a fact the app already
         // knows, and the reason string is what a stalled row carries.
         if (state === "stalled") {
-          if (isUnreviewedStall(runByStep.get(step.id)?.reason)) marks.set(step.id, "unreviewed");
+          const reason = runByStep.get(step.id)?.reason;
+          if (isUnreviewedStall(reason)) marks.set(step.id, "unreviewed");
+          // The rail's own opt-in held this launch (rule 2): the same
+          // shape -- a stall nobody but the human releases -- matched on
+          // the same kind of constant.
+          else if (isLiveConflictHoldStall(reason)) marks.set(step.id, "live-conflict");
           continue;
         }
         if (state !== "running") continue;
@@ -1479,6 +1511,14 @@ export function attentionTip(attention: StepAttention, doneName: string): string
         "the agent edited this rail worktree's own copy of the card instead of the card — " +
         "gavin only ever reads the one in the main checkout, so this step can never finish"
       );
+    // Says what the wait is and what ends it: this rail asked to hold
+    // while other rails' agents share its checkout, and the button on the
+    // step is the confirmation.
+    case "live-conflict":
+      return (
+        "this rail holds its next launch while other rails have agents running in its checkout — " +
+        "press Confirm and start on the step to launch it beside them"
+      );
   }
 }
 
@@ -1589,7 +1629,17 @@ export function nextActions(
   /// know -- every test that is not about this, an app with the feature
   /// off, one talking to a pre-v39 daemon, one whose key is missing --
   /// gets exactly the scheduler that shipped before any of this existed.
-  verdicts: VerdictsBySession = NO_VERDICTS
+  verdicts: VerdictsBySession = NO_VERDICTS,
+  /// The conflicts as `detectConflicts` computed them for this pass, and
+  /// the live ones this window's human already confirmed
+  /// (liveConflictHold.ts). Read ONLY for a rail that opted in to holding
+  /// on a live conflict, and only to keep a pending step from launching.
+  ///
+  /// Empty by default, and that default is rule O4: every caller that
+  /// does not know -- every test that is not about this, an app talking
+  /// to a daemon that cannot store the opt-in -- gets the scheduler that
+  /// never reads conflicts.
+  liveConflicts: LiveConflictInput = NO_LIVE_CONFLICTS
 ): Action[] {
   const actions: Action[] = [];
   // A session with a witnessed exit is dead, even with its tab still up.
@@ -1616,6 +1666,11 @@ export function nextActions(
   // `until` step's budget.
   const toolSummary = new Map((tools ?? []).map((t) => [t.id, t]));
   const runByStep = new Map(orch.stepRuns.map((r) => [r.stepId, r]));
+  // Rule O4's one exception, per rail and only where the rail asked.
+  const heldBy = (rail: Rail): string | null => {
+    const verdict = liveConflictHold(rail, liveConflicts.conflicts, liveConflicts.acknowledged);
+    return verdict.hold ? verdict.reason : null;
+  };
 
   for (const rail of orch.rails) {
     if (railStateOf(orch, rail.id) !== "running") {
@@ -1920,7 +1975,15 @@ export function nextActions(
         // fresh stall re-pauses the rail (rule 5). That is what keeps
         // this one attempt per press of Play rather than a spin.
         if (state === "pending" || state === "stalled") {
-          const reason = launchBlocker(rail, step, entry, knownWorktrees, knownTools, toolKind);
+          // The rail's own opt-in (lc-06), after every blocker that says
+          // the step CANNOT launch: a hold says it may not yet, and a
+          // step that could not start anyway owes the human that reason
+          // instead. Treated exactly as a stall -- the rail pauses (rule
+          // 5), the step carries the reason, and `stepAttentions` marks
+          // it as needing the human's confirmation.
+          const reason =
+            launchBlocker(rail, step, entry, knownWorktrees, knownTools, toolKind) ??
+            heldBy(rail);
           if (reason) {
             actions.push({ kind: "stall", stepId: step.id, reason });
             simulated.set(step.id, "stalled");
@@ -2377,6 +2440,29 @@ export function setRailAutoResume(
   return {
     ...orch,
     rails: orch.rails.map((r) => (r.id === railId ? { ...r, autoResume } : r)),
+  };
+}
+
+/// What a stalled step's Retry is called. A step its rail held on a live
+/// conflict is released by the human's say-so, and Retry is that say-so
+/// (`retryStep` acknowledges the conflict and resumes the rail), so it is
+/// named for what it does there. One spelling for the card, the chip and
+/// the nodes view's menu.
+export function retryLabel(attention: StepAttention | null | undefined): string {
+  return attention === "live-conflict" ? "Confirm and start" : "Retry";
+}
+
+/// Turn this rail's live-conflict hold on or off (lc-06). A plan mutator
+/// like `setRailAutoResume`, and part of the plan for the same reason:
+/// it is a fact about the rail every viewer and every agent reads.
+export function setRailHoldOnLiveConflict(
+  orch: Orchestration,
+  railId: string,
+  holdOnLiveConflict: boolean
+): Orchestration {
+  return {
+    ...orch,
+    rails: orch.rails.map((r) => (r.id === railId ? { ...r, holdOnLiveConflict } : r)),
   };
 }
 

@@ -88,7 +88,7 @@ const CODEX_BASE_URL_KEY: &str = "openai_base_url";
 pub const OPENCODE_PLUGIN: [&str; 5] =
     ["headroom", "providers", "opencode", "_dist", "entry.opencode.js"];
 
-fn is_stock_profile_id(id: &str) -> bool {
+pub(crate) fn is_stock_profile_id(id: &str) -> bool {
     matches!(id, "claude-code" | "codex" | "gemini" | "cursor" | "opencode" | "kimi-code")
 }
 
@@ -127,6 +127,17 @@ impl<'a> Launch<'a> {
                 Launch::Profile(id)
             }
         }
+    }
+
+    /// Whether this launch is an agent gavin wrote a `gavin` MCP entry
+    /// for, so its gavin-mcp is expected to present the session token
+    /// (v81's tools-missing mark). Only a stock profile: every one of
+    /// them carries an MCP layout the Integration step writes, while a
+    /// custom agent has none of gavin's own, a shell has no agent, and a
+    /// command another agent spawned over MCP is nobody's word for what
+    /// it is.
+    pub fn expects_gavin_mcp(self) -> bool {
+        matches!(self, Launch::Profile(id) if is_stock_profile_id(id))
     }
 
     /// The agent this launches, or `None` for a launch that is no

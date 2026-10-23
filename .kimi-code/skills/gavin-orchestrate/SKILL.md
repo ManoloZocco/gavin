@@ -24,6 +24,43 @@ A step is one of two things, never both:
 The human arms a rail with Start; gavin then launches each stage and
 advances when every step in it is done.
 
+## 0. Diagnose first, and fix what is yours to fix
+
+Before you arrange anything, call `gavin_doctor`. It reports what the
+app sees wrong in this workspace: setup steps still missing, cards whose
+fields gavin cannot read or whose rules are acting silently, the worktree
+setup the repository's lockfiles call for against the one declared, and
+how old that reading is. A rail arranged over a broken board runs the
+breakage in parallel.
+
+What you may do about each finding depends on what it touches, and the
+rule is the same every time:
+
+- **Certain and reversible: do it, then say so.** A finding the doctor
+  marks *safe* comes with the exact write: apply it with
+  `gavin_set_plan_field(path, key, value)`. These are status and folder
+  corrections the board already shows; nothing else changes. List what
+  you applied in your summary.
+- **It runs a command, spends quota, or is a choice: propose it.** A
+  finding marked *decide* goes to the human with
+  `gavin_request_human(card, "decision", text, options)`, using the
+  options the doctor gives. Missing worktree setup goes through
+  `gavin_propose_worktree_setup(lines)`: it writes the lines only where
+  none are declared, and they stay switched off until the human approves
+  them in Settings. Never run a proposed line yourself.
+- **Security, remote access, devices, the app's look: leave it.** Say
+  what you saw and stop there.
+
+`gavin_get_effective_config` tells you which agent, model and effort
+each complexity level actually runs on, and where each value came from.
+Read it before you rate cards' complexity to steer a rail: when the
+doctor or this tool says the complexity table is empty, a rating changes
+nothing, so say so instead of relying on it.
+
+If either tool answers that the workspace is not open in gavin, or that
+the daemon is older than the tool, carry on without it and say which
+checks you could not make.
+
 ## 1. Read before you write
 
 Call `gavin_get_orchestration` first, every time. It returns the current
@@ -114,7 +151,9 @@ Two steps collide only when they edit the **same working tree**:
   conflict.
 
 Weigh the card bodies and the rail's `dirtyPaths` before co-staging
-anything. **When unsure, serialize.** A wrong serial order costs time; a
+anything. A rail with no `worktreePath` runs in the root checkout, and its
+`dirtyPaths` are the root's. When you rewrite the rails, carry each one's
+`holdOnLiveConflict` through unchanged: it is the human's choice. **When unsure, serialize.** A wrong serial order costs time; a
 wrong parallel one costs a merge conflict in a live checkout, and the
 human has to untangle two agents' half-finished edits.
 
@@ -208,13 +247,18 @@ the one every absolute card path in the read payload sits under.
    folder beside the repository, and never a line in the root
    `.gitignore` or in `.git/info/exclude`: the folder's own file is the
    whole arrangement, so nothing tracked changes on any branch.
-3. **Then its setup.** `[worktree] setup` in `.gavin-root/config.toml`
-   declares what a fresh checkout needs — `npm install`, `cargo fetch`, an
-   `.env` copy. Gavin runs those for a worktree made in the app; nothing
-   runs them for one made here, so run them yourself in the new checkout,
-   joined with `&&` so a failed install stops the rest. A worktree whose
-   setup failed is worse than no worktree: the rail's first agent looks
-   like it started fine and spends its turn on the install.
+3. **Then its setup.** The Organize / Reorganize prompt hands you the
+   worktree setup commands this workspace has approved. Run only that
+   list in the new checkout, joined with `&&` so a failed install stops
+   the rest. If the prompt lists none, leave the checkout as git left
+   it. Never read `[worktree] setup` from `.gavin-root/config.toml`
+   yourself: that file ships with the repository, and only the approved
+   list in the prompt is safe to run. When the prompt lists none and
+   `gavin_doctor` shows a proposal, file it with
+   `gavin_propose_worktree_setup` for the human to approve, and still
+   run nothing this time. A worktree whose setup failed is
+   worse than no worktree: the rail's first agent looks like it started
+   fine and spends its turn on the install.
 4. **A branch with no worktree** is `git branch <name>` — created, never
    checked out. The rail's own first step is what moves a checkout, once,
    and the human is working in the root one meanwhile. Never

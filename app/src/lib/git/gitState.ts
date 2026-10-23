@@ -25,6 +25,14 @@ import type { AgentCommitRecord, Workspace } from "$lib/core/workspace";
 import { folderName } from "$lib/core/paths";
 import { maybeNotifyAgentCommit, type AgentCommitVerdict } from "$lib/core/notifications";
 import { buildHeadlessCommand } from "$lib/cards/cardRun";
+import {
+  judgeCommitRun,
+  scopeAtVerdict,
+  sharedCheckoutCommitPrompt,
+  type SharedCommitScope,
+} from "$lib/git/sharedCommit";
+import { commitScopeFor, livePeersInCheckout } from "$lib/git/sharedCommitState";
+import { peerTitles } from "$lib/cards/sharedCheckout";
 import { mustPromptBody } from "$lib/agents/actionPromptsState";
 import {
   MAX_AUTO_RESUME_ATTEMPTS,
@@ -147,6 +155,16 @@ export interface GitViewState {
     /// after a restart the run is either alive (and stoppable again) or
     /// already gone.
     stopping: boolean;
+    /// What the run was told it may commit when other agents were live
+    /// in the checkout (sharedCommit.ts) -- null when nobody was, absent
+    /// on a run this window adopted or only watches. In memory only, for
+    /// the verdict: a restart loses it, and `scopeAtVerdict` says what
+    /// that costs.
+    scope?: SharedCommitScope | null;
+    /// The changed paths when this window launched the run, so a run
+    /// launched alone and finished beside a newcomer is held to the
+    /// files it was actually asked to commit.
+    dirtyAtLaunch?: string[];
   } | null;
   /// Set for AGENT_COMMIT_FLASH_MS after a run that actually emptied the
   /// tree, so the button can say it worked. Nothing else flashes: a
@@ -849,7 +867,13 @@ async function launchAgentCommit(
     return { refused: prepared };
   }
   const agent: ResolvedAgent = prepared;
-  const prompt = mustPromptBody("builtin:commit", workspaceId);
+  // Other agents live in this checkout narrow the commit to per-path
+  // staging of what is not theirs (sharedCommit.ts). Asked of the stores
+  // first, so a checkout nobody else is in makes no request at all and
+  // gets the configured body byte for byte.
+  const dirtyAtLaunch = statusPaths(s);
+  const scope = await commitScopeFor(workspaceId, checkoutRoot(s), dirtyAtLaunch);
+  const prompt = sharedCheckoutCommitPrompt(mustPromptBody("builtin:commit", workspaceId), scope);
   const command = buildHeadlessCommand(agent.launchCommand, agent.headlessArgs, prompt);
   if (!command) {
     const why = `Commit via agent needs a headless agent — ${agent.profileId} has none`;
@@ -859,7 +883,7 @@ async function launchAgentCommit(
   const startedAt = Date.now();
   update(workspaceId, (st) => ({
     ...st,
-    agentCommit: { sessionId: null, startedAt, stopping: false },
+    agentCommit: { sessionId: null, startedAt, stopping: false, scope, dirtyAtLaunch },
     agentCommitDone: false,
     error: null,
   }));
@@ -925,8 +949,10 @@ async function watchAgentCommit(
   }
   // Read before the marker is cleared: an exit that arrives because the
   // human pressed Stop has to be told apart from one the run reached on
-  // its own, and the only record of the press is the marker itself.
-  const stopped = current(workspaceId)?.agentCommit?.stopping === true;
+  // its own, and the only record of the press is the marker itself. The
+  // scope it was launched under lives there too.
+  const marker = current(workspaceId)?.agentCommit;
+  const stopped = marker?.stopping === true;
   update(workspaceId, (st) => ({ ...st, agentCommit: null }));
   await forgetAgentCommit(workspaceId, sessionId);
   await refresh(workspaceId);
@@ -951,10 +977,19 @@ async function watchAgentCommit(
   // The working tree is the fact, so it is what gets checked -- saying
   // "Committed" over a tree that is still dirty would be a lie the
   // human only catches by looking.
-  const left = changesLeft(current(workspaceId));
+  const view = current(workspaceId);
+  // A checkout other agents are working in is judged on the files this
+  // run was asked to commit: what they are still writing is not this
+  // run's to have left (sharedCommit.ts).
+  const verdict = judgeCommitRun({
+    exitCode: code,
+    stopped: false,
+    left: leftPaths(view),
+    scope: scopeAtVerdict(marker?.scope, marker?.dirtyAtLaunch, livePeerNames(workspaceId, view)),
+  });
   const said = tail.text();
   const quoted = said ? ` — ${said}` : "";
-  if (code !== 0) {
+  if (verdict.kind === "failed" || verdict.kind === "stopped") {
     noteError(workspaceId, `Commit via agent failed (exit ${code})${quoted}`);
     void announceVerdict(workspaceId, { kind: "failed", exitCode: code });
     // A RETRY, not a resume. A headless run exits on exactly the failures
@@ -966,21 +1001,45 @@ async function watchAgentCommit(
     void maybeRetryCommitRun(workspaceId, spent, said);
     return false;
   }
-  if (left > 0) {
-    noteError(workspaceId, `${leftUncommitted(left)}${quoted}`);
-    void announceVerdict(workspaceId, { kind: "left-dirty", changes: left });
+  if (verdict.kind === "left-dirty") {
+    noteError(workspaceId, `${leftUncommitted(verdict.changes)}${quoted}`);
+    void announceVerdict(workspaceId, { kind: "left-dirty", changes: verdict.changes });
     return false;
   }
   flashAgentCommitDone(workspaceId);
-  void announceVerdict(workspaceId, { kind: "committed" });
+  void announceVerdict(
+    workspaceId,
+    verdict.leftForPeers > 0 ? { kind: "committed", leftForPeers: verdict.leftForPeers } : { kind: "committed" }
+  );
   return true;
 }
 
-const AGENT_COMMIT_STOPPED = "Commit via agent stopped";
-
-function changesLeft(view: GitViewState | null): number {
-  return (view?.status?.unstaged.length ?? 0) + (view?.status?.staged.length ?? 0);
+/// Every changed path in the view, as `git status` names it.
+function statusPaths(view: GitViewState | null): string[] {
+  const paths = [...(view?.status?.unstaged ?? []), ...(view?.status?.staged ?? [])].map((f) => f.path);
+  return [...new Set(paths)];
 }
+
+/// Every status entry left, by path -- a file both staged and unstaged
+/// twice, the way the Git tab has always counted "changes".
+function leftPaths(view: GitViewState | null): string[] {
+  return [...(view?.status?.unstaged ?? []), ...(view?.status?.staged ?? [])].map((f) => f.path);
+}
+
+/// The checkout as git names it: the root the transcript reader resolves
+/// paths against, and the tree a peer's launch directory is tested
+/// inside.
+function checkoutRoot(view: GitViewState): string {
+  return view.repo?.root ?? view.cwd;
+}
+
+/// Who is live in the view's checkout now, by name.
+function livePeerNames(workspaceId: string, view: GitViewState | null): string[] {
+  if (!view) return [];
+  return peerTitles(livePeersInCheckout(workspaceId, checkoutRoot(view)), () => null);
+}
+
+const AGENT_COMMIT_STOPPED = "Commit via agent stopped";
 
 function leftUncommitted(left: number): string {
   return `Commit via agent left ${left} change${left === 1 ? "" : "s"} uncommitted`;
@@ -1315,8 +1374,16 @@ export async function concludeShownAgentCommit(workspaceId: string, stopped: boo
     noteError(workspaceId, AGENT_COMMIT_STOPPED);
     return;
   }
-  const left = changesLeft(current(workspaceId));
-  if (left > 0) noteError(workspaceId, leftUncommitted(left));
+  // Judged as an adopted run is: no scope was seen here, so with other
+  // agents live in the checkout nothing left is held against it.
+  const view = current(workspaceId);
+  const verdict = judgeCommitRun({
+    exitCode: 0,
+    stopped: false,
+    left: leftPaths(view),
+    scope: scopeAtVerdict(undefined, null, livePeerNames(workspaceId, view)),
+  });
+  if (verdict.kind === "left-dirty") noteError(workspaceId, leftUncommitted(verdict.changes));
   else flashAgentCommitDone(workspaceId);
 }
 

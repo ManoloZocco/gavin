@@ -138,6 +138,13 @@ export function sshActivityBlocked(ws: Workspace | null | undefined, links: SshL
   return sshFeatureBlocked(ws, links, FEATURE_MIN_VERSION.sshActivityCalendar, "to read its activity");
 }
 
+/// Whether the app can publish this workspace's insights to its host's
+/// daemon right now (v79): that daemon is the one its agents' gavin-mcp
+/// asks, so its version is the one that counts.
+export function sshInsightsBlocked(ws: Workspace | null | undefined, links: SshLinks): string | null {
+  return sshFeatureBlocked(ws, links, FEATURE_MIN_VERSION.sshWorkspaceInsights, "to publish its insights");
+}
+
 /// Whether the Git tab and Files tree can serve this workspace right now.
 /// Their operations need the host daemon's v40 file and git requests, so
 /// this is what the two hub views gate on -- rendering their content when

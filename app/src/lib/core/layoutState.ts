@@ -29,7 +29,13 @@ import {
   type NotifyPrefs,
   type SessionStatus,
 } from "$lib/core/notifications";
-import { initGavinListeners, watchRootedWorkspaces, gavinTrees, worktreeSetups } from "$lib/core/gavinState";
+import {
+  initGavinListeners,
+  refreshWorktreeSetup,
+  watchRootedWorkspaces,
+  gavinTrees,
+  worktreeSetups,
+} from "$lib/core/gavinState";
 import {
   handleRemoteLinkLost,
   handleRemoteLinkReady,
@@ -52,6 +58,7 @@ import {
 } from "$lib/core/settings";
 import { mergeDiscoveredModels } from "$lib/agents/agentModel";
 import { noteSessionCompression, seedSessionCompression } from "$lib/agents/headroomMarkState";
+import { noteToolsMissing, seedToolsMissing } from "$lib/agents/toolsMissingState";
 import { effectiveListForPrimary, withListForPrimary } from "$lib/agents/promptParams";
 import { workspacePatchWithoutProfile } from "$lib/agents/agentsHub";
 import { normalizeTerminalFontSize, resolveTerminalFontSize } from "$lib/terminal/terminalFont";
@@ -83,6 +90,7 @@ import {
   type CustomProfile,
 } from "$lib/cards/complexity";
 import { cardAgentEntry, type CardAgentFields } from "$lib/cards/cardAgent";
+import type { EffectiveConfigInput } from "$lib/agents/effectiveConfig";
 import {
   configTrusted,
   executionKeys,
@@ -91,6 +99,7 @@ import {
   trustedAgentConfig,
   type ExecutionKeys,
 } from "$lib/workspace/workspaceTrust";
+import { setupSaveStamp } from "$lib/workspace/worktreeSetupEditor";
 import {
   cardContentDigest,
   cardContentReviewed,
@@ -1150,6 +1159,9 @@ async function seedSessionBaselines(): Promise<void> {
   // The Headroom mark's facts, from the same read: a reload missed the
   // `session-compression` event each session was created with.
   seedSessionCompression(baselines);
+  // And the no-gavin-tools mark (v81), for the same reason: its push
+  // arrived once per app process.
+  seedToolsMissing(baselines);
   const known = get(layoutState);
   const fresh = baselines.filter((b) => known.cwdBySessionId[b.id] === undefined);
   for (const b of fresh) {
@@ -1439,6 +1451,14 @@ export async function bootstrap(): Promise<void> {
       (event) => noteSessionCompression(event.payload.id, event.payload)
     )
   );
+  // An agent session's gavin-mcp never said hello within the daemon's
+  // grace, or said it late after all (v81). The tab and sidebar marks
+  // read it (toolsMissing.ts).
+  unlisteners.push(
+    await listen<{ id: string; missing: boolean }>("session-tools-missing", (event) =>
+      noteToolsMissing(event.payload.id, event.payload.missing)
+    )
+  );
   // Fires for every change to a session's queue, whoever made it: this
   // window adding one, another surface reordering one, and -- the case
   // with no local cause at all -- the daemon delivering the head because
@@ -1542,6 +1562,13 @@ export async function bootstrap(): Promise<void> {
   );
   unlisteners.push(await initCompression());
   unlisteners.push(whileHoldingAppDuties(startCompressionSwitch));
+  // What the app works out about each workspace -- effective agent config,
+  // card lint, worktree setup proposal, setup steps left -- published to
+  // the daemon for gavin-mcp's doctor (v79). One teller, from the window
+  // holding the duties, like the switch above. Dynamically imported for
+  // the cycle reason above (it reads this module's stores).
+  const { startWorkspaceInsights } = await import("$lib/workspace/workspaceInsightsState");
+  unlisteners.push(whileHoldingAppDuties(startWorkspaceInsights));
   // The adopted-memory index: a workspace opened with memories the index
   // does not match is brought up without anyone opening the wizard. One
   // window, so two do not race the same model download. Dynamically
@@ -2793,6 +2820,25 @@ export const cardAgents = derived(
     }
 );
 
+/// What `effectiveConfig.ts` resolves, gathered from the same stores
+/// `cardAgents` reads: `$effectiveConfigInputs(workspaceId)`. A store of
+/// a function for `cardAgents`' reason -- the profile table and the
+/// defaults arrive after mount, and a modal must follow them.
+export const effectiveConfigInputs = derived(
+  [trustedAgentConfigs, layoutState, agentProfilesStore, agentModelDefaultsStore, agentDefaultsStore],
+  ([$configs, $layout, $profiles, $models, $defaults]) =>
+    (workspaceId: string): EffectiveConfigInput => {
+      const ws = $layout.workspaces.find((w) => w.id === workspaceId) ?? null;
+      return {
+        agentConfig: $configs(workspaceId),
+        profiles: mergeAgentProfiles($profiles, $defaults.customProfiles ?? [], ws?.customProfiles ?? []),
+        globalModels: $models,
+        defaults: $defaults,
+        workspace: ws,
+      };
+    }
+);
+
 // Starts the workspace's main agent: a normal daemon session at the
 // workspace root, remembered on the workspace rather than placed in a
 // page tree (D12). Never called automatically.
@@ -2962,6 +3008,33 @@ export async function setAgentField(
       hasExecutionKeys(keys) ? executionKeysHash(keys) : undefined
     );
   }
+}
+
+/// The Settings editor's Save for `[worktree] setup` (v80): writes the
+/// lines through the daemon and, when that approves nothing the human was
+/// not shown, re-stamps the trust marker in the same breath — the rule is
+/// `setupSaveStamp`'s. Throws on a refused write (unlike `setAgentField`),
+/// so the editor shows the daemon's reason in place, and stamps nothing
+/// then: a marker for lines config.toml never took would pre-approve
+/// whatever lands in the key next.
+///
+/// The human's own writer only. An agent's proposal reaches the daemon
+/// through `gavin_propose_worktree_setup` and never passes here, so it
+/// lands unapproved and the trust notice asks.
+export async function saveWorktreeSetup(
+  workspaceId: string,
+  lines: string[]
+): Promise<{ written: boolean; lines: string[]; stamped: boolean }> {
+  const ws = get(layoutState).workspaces.find((w) => w.id === workspaceId);
+  if (!ws?.rootPath) throw new Error("Bind a root folder before editing the worktree setup.");
+  const before = configTrustFor(workspaceId);
+  const result = await backend.setWorktreeSetup(ws.rootPath, lines, false);
+  const decision = result.written ? setupSaveStamp(before, result.lines) : null;
+  if (decision) await stampConfigTrust(workspaceId, decision.stamp);
+  // Rather than wait for the watcher's push: the editor and the trust
+  // notice both read this store, and both should show the saved value now.
+  await refreshWorktreeSetup(workspaceId, ws.rootPath);
+  return { ...result, stamped: decision !== null };
 }
 
 /// Writes a new workspace agent profile together with that profile's

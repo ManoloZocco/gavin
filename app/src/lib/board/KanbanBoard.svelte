@@ -10,6 +10,7 @@
   import { flattenCardViews, mergePlanCards, type CardView } from "$lib/core/planBoard";
   import { planCommitFromMerged } from "$lib/files/planDrop";
   import { runCard, resumeCard, developCard, sendToMainAgent } from "$lib/cards/cardRunActions";
+  import { runCardsInOwnWorktrees } from "$lib/cards/ownWorktreeRun";
   import { layoutState, daemonCompat } from "$lib/core/layoutState";
   import {
     cardDeleteLines,
@@ -359,6 +360,14 @@
     if (err) planWriteError = err;
   }
 
+  // "Each in its own worktree" (sharedCheckout.ts): a Start all, Run all
+  // or Run selected whose cards would otherwise share one checkout.
+  async function handleRunInOwnWorktrees(cards: CardView[]): Promise<void> {
+    planWriteError = null;
+    const err = await runCardsInOwnWorktrees(workspaceId, cards);
+    if (err) planWriteError = err;
+  }
+
   // --- deleting from the archive (archiveDelete.ts) --------------------
   // The archive is the one board surface whose cards nothing else will
   // ever clear: every other column empties into it. So it owns the only
@@ -674,6 +683,7 @@
             onOpenPlanCard={(path) => (openPlanPath = path)}
             onRunCard={handleRun}
             onResumeCard={handleResume}
+            onRunInOwnWorktrees={handleRunInOwnWorktrees}
             onSendToAgent={handleSendToAgent}
             {agentAvailable}
             onDeleteCard={(card) => (pendingDelete = card)}
@@ -717,7 +727,7 @@
       onExit={leaveArchiveSelectMode}
     />
   {:else if !showingArchive}
-    <BoardSelectionBar {workspaceId} {allCards} onRunCard={handleRun} />
+    <BoardSelectionBar {workspaceId} {allCards} onRunCard={handleRun} onRunInOwnWorktrees={handleRunInOwnWorktrees} />
   {/if}
   <KanbanDragPreview {board} {merged} labels={board.labels} root={boardEl} />
   {#if pendingDelete}

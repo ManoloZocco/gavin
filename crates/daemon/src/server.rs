@@ -500,6 +500,13 @@ fn open_agent_door(manager: &SessionManager, id: &str) -> bool {
 /// paste a queued follow-up into an agent that is busy -- that wait is
 /// exactly what the idle path is for.
 fn note_agent_ready(manager: &SessionManager, id: &str) {
+    // Its tools arrived. Any Hello at all, waiting or not: a session
+    // marked as missing them whose gavin-mcp finally starts -- an agent
+    // released from a trust screen -- has them now, and its mark goes.
+    let spawned = manager.tools_watch.lock().unwrap().remove(id);
+    if tools_missing_after(spawned, manager.tools_missing_grace()) {
+        manager.announce_tools_missing(id, false);
+    }
     if manager.awaiting_agent_since.lock().unwrap().contains_key(id) {
         manager.agent_announced.lock().unwrap().insert(id.to_string());
     }
@@ -575,6 +582,71 @@ fn spawn_agent_ready_fallback(manager: &Arc<SessionManager>, id: String, heurist
 
 /// How often the agent-ready poll looks at a waiting session's terminal.
 const AGENT_READY_POLL: Duration = Duration::from_millis(50);
+
+/// How long an agent session may run with no Hello from its gavin-mcp
+/// before it is marked as having no `gavin_*` tools (v81, lc-01).
+///
+/// Forty-five seconds, three times `AGENT_READY_GRACE`. That grace is
+/// already the bound for "the handshake is late, not absent": gavin-mcp
+/// announces itself eagerly at startup rather than on the first tool call
+/// (`announce_to_daemon`), and the CLIs start their MCP servers while the
+/// TUI is still coming up -- kimi's Hello lands before its terminal has
+/// even gone raw (`AGENT_SETTLE`). The slow path is a cold start on a
+/// loaded machine, a launcher resolving a package before anything runs,
+/// and AGENT_READY_GRACE was chosen to cover it. Three times that makes
+/// the mark mean "this is not coming", not "this is slow". It is cleared
+/// if the Hello arrives after all -- an agent held at a folder-trust or
+/// server-approval screen starts no MCP server until the human answers --
+/// so being early costs a mark that goes away, never a run.
+///
+/// Held on the manager as milliseconds, like `agent_ready_grace_ms`, so a
+/// test can shorten it instead of sleeping it out.
+const TOOLS_MISSING_GRACE: Duration = Duration::from_secs(45);
+
+/// How often the tools-missing watch looks at its session. Coarse on
+/// purpose: it is a deadline tens of seconds out, not a terminal to read.
+const TOOLS_MISSING_POLL: Duration = Duration::from_millis(250);
+
+/// Whether a watched session counts as missing its tools: it is still
+/// watched (no Hello yet) and the grace period since spawn is over.
+fn tools_missing_after(spawned: Option<Instant>, grace: Duration) -> bool {
+    spawned.is_some_and(|since| since.elapsed() >= grace)
+}
+
+/// The timer behind the tools-missing mark, spawned beside the pump for
+/// every hosted session: it returns at once for one that is not watched
+/// (a shell, a custom agent, a recovered row). At the deadline, a session
+/// still watched and still alive is marked, and the desks are told.
+///
+/// A timer and not only a read at `ListSessions`: the mark is for a
+/// session nobody is looking at closely, and the tab has to change on its
+/// own. The read stays lazy (`SessionManager::tools_missing`), so the
+/// baseline and the push can never disagree about the same instant.
+fn spawn_tools_missing_watch(manager: &Arc<SessionManager>, id: String) {
+    let Some(spawned) = manager.tools_watch.lock().unwrap().get(&id).copied() else { return };
+    let manager = Arc::clone(manager);
+    std::thread::spawn(move || {
+        loop {
+            if !manager.tools_watch.lock().unwrap().contains_key(&id) {
+                return;
+            }
+            if !manager.sessions.lock().unwrap().contains_key(&id) {
+                return;
+            }
+            if spawned.elapsed() >= manager.tools_missing_grace() {
+                break;
+            }
+            std::thread::sleep(TOOLS_MISSING_POLL);
+        }
+        manager.announce_tools_missing(&id, true);
+        // A Hello that landed between the check above and the push has
+        // already told the desks `false`, and this `true` arrived after
+        // it. Say it again, so the last word is the right one.
+        if !manager.tools_watch.lock().unwrap().contains_key(&id) {
+            manager.announce_tools_missing(&id, false);
+        }
+    });
+}
 
 /// Why this session cannot be handed a follow-up right now, or `None` if
 /// it can.
@@ -1573,6 +1645,8 @@ fn session_summary(r: SessionRecord) -> SessionSummary {
         // Not a registry fact: the daemon's Headroom keeps it, and
         // `list_sessions` puts it in (v50).
         headroom_reach: None,
+        // Nor this one: `list_sessions` reads it off the watch (v81).
+        tools_missing: false,
     }
 }
 
@@ -1659,6 +1733,10 @@ pub struct SessionManager {
     /// watcher for the root they actually chose. Locked before
     /// `gavin_watchers`, never after.
     gavin_watch_generation: Mutex<HashMap<String, u64>>,
+    /// What the app last published about each workspace (v79), by
+    /// canonical root. In memory only -- see `insights.rs` for why a
+    /// restart forgetting it is the right behaviour.
+    workspace_insights: Mutex<crate::insights::InsightsStore>,
     /// Sessions with a queued follow-up being delivered right now.
     ///
     /// Delivery is peek -> write -> take, and that middle step cannot be
@@ -1692,6 +1770,16 @@ pub struct SessionManager {
     /// shorten the wait the way `session_ceiling` is lowered, instead of
     /// sleeping the real fifteen seconds out.
     agent_ready_grace_ms: AtomicU64,
+    /// Agent sessions whose gavin-mcp is expected to say hello and has
+    /// not yet, keyed to when they were spawned (v81). Entered at spawn
+    /// for a stock agent profile only (`Launch::expects_gavin_mcp`), left
+    /// on the first Hello (`note_agent_ready`) and when the session is
+    /// killed. In here past `TOOLS_MISSING_GRACE` is what "no gavin
+    /// tools" means. In memory for the reason `awaiting_agent_since` is.
+    tools_watch: Mutex<HashMap<String, Instant>>,
+    /// See `TOOLS_MISSING_GRACE`. Millis in an atomic, like
+    /// `agent_ready_grace_ms`, so a test can shorten it.
+    tools_missing_grace_ms: AtomicU64,
     /// The size each session's PTY was last set to.
     ///
     /// Remembered so a resize that changes nothing can be told from one
@@ -2256,10 +2344,13 @@ impl SessionManager {
             session_repo_root: Mutex::new(HashMap::new()),
             gavin_watchers: Mutex::new(HashMap::new()),
             gavin_watch_generation: Mutex::new(HashMap::new()),
+            workspace_insights: Mutex::new(crate::insights::InsightsStore::default()),
             delivering_queued: Mutex::new(std::collections::HashSet::new()),
             awaiting_agent_since: Mutex::new(HashMap::new()),
             agent_announced: Mutex::new(std::collections::HashSet::new()),
             agent_ready_grace_ms: AtomicU64::new(AGENT_READY_GRACE.as_millis() as u64),
+            tools_watch: Mutex::new(HashMap::new()),
+            tools_missing_grace_ms: AtomicU64::new(TOOLS_MISSING_GRACE.as_millis() as u64),
             last_pty_size: Mutex::new(HashMap::new()),
             provoked_repaint_at: Mutex::new(HashMap::new()),
             session_ceiling: AtomicUsize::new(MAX_LIVE_SESSIONS),
@@ -2441,6 +2532,27 @@ impl SessionManager {
     /// The live agent-ready grace window. See `AGENT_READY_GRACE`.
     fn agent_ready_grace(&self) -> Duration {
         Duration::from_millis(self.agent_ready_grace_ms.load(Ordering::SeqCst))
+    }
+
+    /// The live tools-missing grace. See `TOOLS_MISSING_GRACE`.
+    fn tools_missing_grace(&self) -> Duration {
+        Duration::from_millis(self.tools_missing_grace_ms.load(Ordering::SeqCst))
+    }
+
+    /// Whether this session is an agent running without its `gavin_*`
+    /// tools right now (v81): watched, and past the grace with no Hello.
+    pub fn tools_missing(&self, id: &str) -> bool {
+        let spawned = self.tools_watch.lock().unwrap().get(id).copied();
+        tools_missing_after(spawned, self.tools_missing_grace())
+    }
+
+    /// Tells the desks that can be told whether `id` has its tools. A new
+    /// `Response` variant, so only an app that speaks it gets it.
+    fn announce_tools_missing(&self, id: &str, missing: bool) {
+        self.push_to_apps_speaking(
+            protocol::TOOLS_MISSING_MIN_VERSION,
+            &Response::SessionToolsMissing { id: id.to_string(), missing },
+        );
     }
 
     /// Hands this daemon its Headroom. Called once by `serve` before the
@@ -4237,7 +4349,33 @@ impl SessionManager {
             generations.insert(workspace_id.to_string(), next);
             removed = self.gavin_watchers.lock().unwrap().remove(workspace_id);
         }
+        // Nobody keeps a closed workspace's insights current any more, and
+        // an agent reading them would be told about the workspace as it
+        // stood when it was closed. Kept while another watch still has the
+        // same root open, since that one's app is still the teller.
+        if let Some(watcher) = &removed {
+            if !self.watched_roots().contains(&watcher.root_path) {
+                self.workspace_insights.lock().unwrap().forget(&watcher.root_path);
+            }
+        }
         drop(removed);
+    }
+
+    /// Files what the app worked out about a workspace (v79). Confined to
+    /// a root this daemon is watching, which is also what keeps the map
+    /// as small as the set of open workspaces.
+    pub fn publish_workspace_insights(&self, root_path: &str, insights: serde_json::Value) -> anyhow::Result<()> {
+        let root = crate::gavin::confine_root_path(std::path::Path::new(root_path), &self.watched_roots())?;
+        self.workspace_insights.lock().unwrap().publish(&root, insights, crate::kanban::now_secs())
+    }
+
+    /// The last insights published for a root, and when. Not confined to a
+    /// watched root: a read of an unknown one is simply empty.
+    pub fn get_workspace_insights(&self, root_path: &str) -> (Option<serde_json::Value>, Option<i64>) {
+        match self.workspace_insights.lock().unwrap().get(std::path::Path::new(root_path)) {
+            Some(p) => (Some(p.insights.clone()), Some(p.published_at)),
+            None => (None, None),
+        }
     }
 
     pub fn gavin_tree_snapshot(&self, workspace_id: &str) -> Option<protocol::GavinTree> {
@@ -4482,6 +4620,13 @@ impl SessionManager {
         // is held for the Hello door rather than delivered on idle --
         // see `delivery_held_for_agent`.
         self.awaiting_agent_since.lock().unwrap().insert(id.clone(), Instant::now());
+        // And the tools-missing window, for an agent gavin wrote a
+        // `gavin` MCP entry for -- never a shell or a custom agent, which
+        // have no gavin-mcp to wait for (`Launch::expects_gavin_mcp`). A
+        // profile with no command line is a shell with a label.
+        if command.is_some() && launch.expects_gavin_mcp() {
+            self.tools_watch.lock().unwrap().insert(id.clone(), Instant::now());
+        }
         Ok(Created {
             id,
             compressed: compression.compressed(),
@@ -4524,6 +4669,8 @@ impl SessionManager {
                 summary.headroom_reach = headroom
                     .and_then(|headroom| headroom.reach_of(&summary.id))
                     .map(|reach| reach.id().to_string());
+                // Kept in memory beside the PTY, like the above (v81).
+                summary.tools_missing = self.tools_missing(&summary.id);
                 summary
             })
             .collect())
@@ -5879,6 +6026,7 @@ impl SessionManager {
         self.slept_mid_turn.lock().unwrap().remove(id);
         self.awaiting_agent_since.lock().unwrap().remove(id);
         self.agent_announced.lock().unwrap().remove(id);
+        self.tools_watch.lock().unwrap().remove(id);
         Ok(())
     }
 
@@ -6472,6 +6620,7 @@ impl SessionManager {
             });
             spawn_heuristic_idle_timer(&manager, id.clone(), Arc::clone(&heuristic));
             spawn_agent_ready_fallback(&manager, id.clone(), Arc::clone(&heuristic));
+            spawn_tools_missing_watch(&manager, id.clone());
 
             loop {
                 match reader.read(&mut buf) {
@@ -7081,6 +7230,14 @@ pub fn handle_request(manager: &SessionManager, req: Request) -> Response {
             crate::gavin::set_root_config_field(std::path::Path::new(&root_path), &key, &value)
                 .map(|_| Response::Ok)
         }
+        // The `[worktree] setup` writer (v80). The watcher's push carries
+        // the change to the app, whose trust hash then holds the lines
+        // off until the human approves them -- or, for the human's own
+        // Settings save, re-stamps it in the same breath.
+        Request::SetWorktreeSetup { root_path, lines, only_if_absent } => {
+            crate::gavin::set_worktree_setup(std::path::Path::new(&root_path), &lines, only_if_absent)
+                .map(|(written, lines)| Response::WorktreeSetupWritten { written, lines })
+        }
         Request::ScanGavinRoot { root_path } => Ok(Response::GavinTreeScanned {
             tree: crate::gavin::scan_root(std::path::Path::new(&root_path)),
         }),
@@ -7276,6 +7433,16 @@ pub fn handle_request(manager: &SessionManager, req: Request) -> Response {
             .map(|_| Response::Ok),
         Request::ShellWrites { conversation_id } => {
             manager.shell_writes(&conversation_id).map(|writes| Response::ShellWrites { writes })
+        }
+        // Workspace insights (v79): the app publishes, an agent reads
+        // (`agent_allows` scopes the read to its own root and refuses it
+        // the publish).
+        Request::PublishWorkspaceInsights { root_path, insights } => {
+            manager.publish_workspace_insights(&root_path, insights).map(|_| Response::Ok)
+        }
+        Request::GetWorkspaceInsights { root_path } => {
+            let (insights, published_at) = manager.get_workspace_insights(&root_path);
+            Ok(Response::WorkspaceInsights { insights, published_at })
         }
         // Scheduled tasks (v77, ADR 0010): the app's, and a Device's
         // through the desk.
@@ -7764,6 +7931,10 @@ fn agent_allows(id: &ClientIdentity, req: &Request) -> bool {
         | Request::GetBoardByRoot { root_path }
         | Request::GetOrchestrationByRoot { root_path }
         | Request::GetToolsByRoot { root_path }
+        // What the app worked out about its own workspace (v79): the
+        // effective config and the doctor's report. A read of a snapshot,
+        // scoped like every other `*ByRoot` read.
+        | Request::GetWorkspaceInsights { root_path }
         | Request::InitGavinRoot { root_path, .. } => agent_root_in_scope(id, root_path),
         Request::SetOrchestrationByRoot { root_path, .. }
         | Request::SetRailRunByRoot { root_path, .. } => agent_root_in_scope(id, root_path),
@@ -7807,6 +7978,18 @@ fn agent_allows(id: &ClientIdentity, req: &Request) -> bool {
         // the session: what it could forge is a line in a Review tab, about
         // files in a root it already writes to.
         Request::RecordShellWrites { root, .. } => agent_root_in_scope(id, root),
+
+        // Proposing its own workspace's `[worktree] setup` (v80,
+        // `gavin_propose_worktree_setup`), and ONLY proposing: the
+        // `only_if_absent` form, which never replaces a value a human
+        // declared. The plain write -- the Settings editor's -- would let
+        // an agent swap an approved install for its own, so it falls
+        // under the same refusal as `SetRootConfigField`. Allowed at all
+        // because nothing it writes runs: the app's trust hash covers
+        // these lines, so a proposal waits inert for the human's approval.
+        Request::SetWorktreeSetup { root_path, only_if_absent, .. } => {
+            *only_if_absent && agent_root_in_scope(id, root_path)
+        }
 
         // Spawning is allowed but confined: an agent may open another
         // visible session in its OWN workspace (an orchestration agent
@@ -7884,6 +8067,11 @@ fn agent_allows(id: &ClientIdentity, req: &Request) -> bool {
         // The activity calendar's read (v78): every run in a window, the
         // run history above across a whole workspace.
         | Request::ActivityRuns { .. }
+        // Publishing a workspace's insights (v79) is the app's: the
+        // snapshot is what an agent is told about its configuration, and
+        // an agent that could write it would be choosing its own
+        // diagnosis. It reads them through `GetWorkspaceInsights` above.
+        | Request::PublishWorkspaceInsights { .. }
         // What every run's shell calls wrote (v72): the Review tab's
         // read. An agent records its own and has no use for this one.
         | Request::ShellWrites { .. }
@@ -8126,6 +8314,10 @@ fn is_privileged(req: &Request) -> bool {
             | Request::Shutdown
             | Request::EndOrphan { .. }
             | Request::SetRootConfigField { .. }
+            // Writes the shell lines a new worktree runs (v80) -- inert
+            // until the human approves them, but the same file and the
+            // same reach as `SetRootConfigField` above.
+            | Request::SetWorktreeSetup { .. }
             // Writes the MCP config that decides what the next agent
             // runs, which is the same reach `SetRootConfigField` has.
             | Request::WriteWorkspaceFile { .. }
@@ -9062,6 +9254,7 @@ mod tests {
             worktree_path: None,
             branch: None,
             auto_resume: None,
+            hold_on_live_conflict: None,
             trigger: None,
             page_id: None,
             stages: vec![protocol::Stage {
@@ -9949,6 +10142,57 @@ mod tests {
         }
     }
 
+    /// An agent may PROPOSE its own workspace's `[worktree] setup` -- the
+    /// `only_if_absent` form -- and nothing more: the plain write would
+    /// let it replace a human's approved install, and another
+    /// workspace's root is outside its scope either way. A local
+    /// connection keeps the plain write (the Settings editor's), behind
+    /// the token switch like `SetRootConfigField`.
+    #[test]
+    fn an_agent_may_only_propose_its_own_worktree_setup() {
+        let (_ws, root, _card) = workspace_with_card();
+        let (_other, other_root, _other_card) = workspace_with_card();
+        let id = ClientIdentity::agent("sess-1", &root, &root);
+        let setup = |root_path: &str, only_if_absent: bool| Request::SetWorktreeSetup {
+            root_path: root_path.into(),
+            lines: vec!["npm ci".into()],
+            only_if_absent,
+        };
+
+        assert!(authorize(&id, &setup(&root, true), false).is_ok());
+        for req in [setup(&root, false), setup(&other_root, true)] {
+            assert!(
+                matches!(authorize(&id, &req, false), Err(Response::Forbidden { role, .. }) if role == "agent"),
+                "{req:?}"
+            );
+        }
+        assert!(is_privileged(&setup(&root, false)));
+
+        // Through the handler: the proposal lands, a second one does not
+        // replace it, and the reply names what is declared.
+        let state = tempfile::tempdir().unwrap();
+        let manager = test_manager(&state);
+        match handle_request(&manager, setup(&root, true)) {
+            Response::WorktreeSetupWritten { written, lines } => {
+                assert!(written);
+                assert_eq!(lines, vec!["npm ci".to_string()]);
+            }
+            other => panic!("expected WorktreeSetupWritten, got {other:?}"),
+        }
+        let second = Request::SetWorktreeSetup {
+            root_path: root.clone(),
+            lines: vec!["yarn install --frozen-lockfile".into()],
+            only_if_absent: true,
+        };
+        match handle_request(&manager, second) {
+            Response::WorktreeSetupWritten { written, lines } => {
+                assert!(!written, "a declared setup is never replaced by a proposal");
+                assert_eq!(lines, vec!["npm ci".to_string()]);
+            }
+            other => panic!("expected WorktreeSetupWritten, got {other:?}"),
+        }
+    }
+
     /// The agent role's half of the tool guard, and only its half: this
     /// says WHICH WORKSPACE an agent is standing in. Which tools inside
     /// it are writable is `save_tool_by_root`'s guard, tested above --
@@ -10260,6 +10504,7 @@ mod tests {
             Request::RemoveExternalGavinContext { root_path: "/x".into(), folder: "/y".into() },
             sff("/x/a.md"),
             Request::SetRootConfigField { root_path: "/x".into(), key: "k".into(), value: "v".into() },
+            Request::SetWorktreeSetup { root_path: "/x".into(), lines: vec!["npm ci".into()], only_if_absent: true },
             Request::ScanGavinRoot { root_path: "/x".into() },
             Request::ReadPrd { root_path: "/x".into() },
             Request::ReadWorkspaceFile { root_path: "/x".into(), path: "a.md".into() },
@@ -10336,6 +10581,8 @@ mod tests {
             Request::NameSession { session_id: "s".into(), name: "n".into(), agent_conversation_id: None },
             Request::CardRuns { workspace_id: "w".into(), path: "/x/a.md".into() },
             Request::GetCardSession { workspace_id: "w".into(), path: "/x/a.md".into() },
+            Request::PublishWorkspaceInsights { root_path: "/x".into(), insights: serde_json::json!({}) },
+            Request::GetWorkspaceInsights { root_path: "/x".into() },
             Request::ToolRuns { workspace_id: "w".into() },
             Request::GetProtocolVersion,
             Request::Shutdown,
@@ -15319,6 +15566,7 @@ mod tests {
                     worktree_path: None,
                     branch: None,
                     auto_resume: None,
+                    hold_on_live_conflict: None,
                     trigger: None,
                     page_id: None,
                     stages: vec![protocol::Stage {
@@ -15387,6 +15635,97 @@ mod tests {
     /// binding still has an agent behind it.
     fn live_session(manager: &SessionManager) -> String {
         manager.create_session("/tmp/ws", "/tmp", Some("/bin/sh"), Launch::Shell).unwrap()
+    }
+
+    // --- Workspace insights (v79) -------------------------------------
+
+    /// gavin-mcp reads its own workspace's insights and nobody else's, and
+    /// may never write them: the snapshot is the diagnosis an agent is
+    /// handed, and one it could write would be its own.
+    #[test]
+    fn an_agent_reads_its_own_workspaces_insights_and_never_publishes() {
+        let (_ws, root, _card) = workspace_with_card();
+        let (_other, other_root, _other_card) = workspace_with_card();
+        let agent = ClientIdentity::agent("sess-1", &root, &root);
+        assert!(authorize(&agent, &Request::GetWorkspaceInsights { root_path: root.clone() }, false).is_ok());
+        assert!(matches!(
+            authorize(&agent, &Request::GetWorkspaceInsights { root_path: other_root }, false),
+            Err(Response::Forbidden { role, .. }) if role == "agent"
+        ));
+        assert!(matches!(
+            authorize(
+                &agent,
+                &Request::PublishWorkspaceInsights { root_path: root, insights: serde_json::json!({}) },
+                false
+            ),
+            Err(Response::Forbidden { role, .. }) if role == "agent"
+        ));
+    }
+
+    /// The whole loop the two tools ride on: the app publishes for a root
+    /// it watches, a reader spelling the root another way gets the same
+    /// snapshot with the time it arrived, and closing the workspace takes
+    /// the snapshot with it.
+    #[test]
+    fn published_insights_read_back_until_the_workspace_is_unwatched() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        let (manager, root, _card) = manager_watching_a_card(&dir, &ws, "To Do");
+        let insights = serde_json::json!({ "version": 1, "setup": { "configured": true, "missing": [] } });
+
+        match handle_request(
+            &manager,
+            Request::PublishWorkspaceInsights { root_path: root.clone(), insights: insights.clone() },
+        ) {
+            Response::Ok => {}
+            other => panic!("expected Ok, got {other:?}"),
+        }
+        let before = crate::kanban::now_secs();
+        let respelled = format!("{root}/.");
+        match handle_request(&manager, Request::GetWorkspaceInsights { root_path: respelled }) {
+            Response::WorkspaceInsights { insights: Some(got), published_at: Some(at) } => {
+                assert_eq!(got, insights);
+                assert!(at <= before && before - at < 60, "published_at {at} vs now {before}");
+            }
+            other => panic!("expected the published insights, got {other:?}"),
+        }
+
+        manager.unwatch_gavin_root("ws-1");
+        match handle_request(&manager, Request::GetWorkspaceInsights { root_path: root }) {
+            Response::WorkspaceInsights { insights: None, published_at: None } => {}
+            other => panic!("expected nothing after the unwatch, got {other:?}"),
+        }
+    }
+
+    /// Publishing is confined to a root this daemon watches -- which is
+    /// also what bounds the map -- and the size cap holds on the wire.
+    #[test]
+    fn insights_are_refused_for_an_unwatched_root_and_past_the_size_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let (manager, root, _card) = manager_watching_a_card(&dir, &ws, "To Do");
+
+        match handle_request(
+            &manager,
+            Request::PublishWorkspaceInsights {
+                root_path: wire_spelling(elsewhere.path()),
+                insights: serde_json::json!({}),
+            },
+        ) {
+            Response::Error { message } => assert!(message.contains("not a workspace"), "{message}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        let heavy = serde_json::json!({ "blob": "x".repeat(protocol::MAX_WORKSPACE_INSIGHTS_BYTES) });
+        match handle_request(&manager, Request::PublishWorkspaceInsights { root_path: root.clone(), insights: heavy }) {
+            Response::Error { message } => assert!(message.contains("at most"), "{message}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        // Nothing was published, which is a reply rather than an error.
+        match handle_request(&manager, Request::GetWorkspaceInsights { root_path: root }) {
+            Response::WorkspaceInsights { insights: None, published_at: None } => {}
+            other => panic!("expected an empty reply, got {other:?}"),
+        }
     }
 
     // --- Scheduled tasks (v77) ----------------------------------------
@@ -18929,6 +19268,110 @@ mod tests {
         let summary = manager.list_sessions().unwrap().into_iter().find(|s| s.id == id).unwrap();
         assert!(!summary.compressed);
         assert_eq!(summary.uncompressed_reason, None);
+        manager.kill_session(&id).unwrap();
+    }
+
+    /// lc-01: an agent session whose gavin-mcp never said hello is marked
+    /// once the grace is over, and one whose gavin-mcp did is not.
+    #[test]
+    fn an_agent_session_with_no_hello_is_flagged_and_one_with_a_hello_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = test_manager(&dir);
+        manager.tools_missing_grace_ms.store(0, Ordering::SeqCst);
+        let flagged = |id: &str| {
+            manager.list_sessions().unwrap().into_iter().find(|s| s.id == id).unwrap().tools_missing
+        };
+
+        let silent = manager
+            .create_session("/tmp", "/tmp", Some("sleep 30"), Launch::Profile("claude-code"))
+            .unwrap();
+        let greeted = manager
+            .create_session("/tmp", "/tmp", Some("sleep 30"), Launch::Profile("codex"))
+            .unwrap();
+        // What a Hello presenting `greeted`'s session token does.
+        note_agent_ready(&manager, &greeted);
+
+        assert!(flagged(&silent), "no Hello past the grace is no gavin tools");
+        assert!(!flagged(&greeted), "a Hello is its tools arriving");
+
+        // A Hello that comes late clears the mark.
+        note_agent_ready(&manager, &silent);
+        assert!(!flagged(&silent));
+
+        manager.kill_session(&silent).unwrap();
+        manager.kill_session(&greeted).unwrap();
+    }
+
+    /// The mark is for an agent gavin wrote a gavin MCP entry for. A shell,
+    /// a custom agent and a profile launch with no command line have no
+    /// gavin-mcp to wait for, however long they run.
+    #[test]
+    fn a_shell_or_a_custom_agent_is_never_flagged_as_missing_its_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = test_manager(&dir);
+        manager.tools_missing_grace_ms.store(0, Ordering::SeqCst);
+
+        let shell = manager.create_session("/tmp", "/tmp", Some("sleep 30"), Launch::Shell).unwrap();
+        let tab = manager.create_session("/tmp", "/tmp", None, Launch::Shell).unwrap();
+        let custom = manager
+            .create_session("/tmp", "/tmp", Some("sleep 30"), Launch::Profile("my-agent"))
+            .unwrap();
+        let bare = manager.create_session("/tmp", "/tmp", None, Launch::Profile("claude-code")).unwrap();
+
+        for id in [&shell, &tab, &custom, &bare] {
+            assert!(!manager.tools_missing(id), "{id}");
+            manager.kill_session(id).unwrap();
+        }
+    }
+
+    /// Inside the grace an agent is only slow, not missing anything.
+    #[test]
+    fn an_agent_inside_the_grace_is_not_flagged_yet() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = test_manager(&dir);
+        let id = manager
+            .create_session("/tmp", "/tmp", Some("sleep 30"), Launch::Profile("claude-code"))
+            .unwrap();
+        assert!(!manager.tools_missing(&id));
+        manager.kill_session(&id).unwrap();
+    }
+
+    /// The desk hears the mark when the grace runs out, and hears it go
+    /// when a late Hello arrives -- and an app too old to parse the push
+    /// is never sent it.
+    #[test]
+    fn the_tools_missing_mark_is_pushed_on_and_off_to_an_app_that_speaks_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = test_manager(&dir);
+        manager.tools_missing_grace_ms.store(100, Ordering::SeqCst);
+        let (ours, theirs) = Stream::pair().unwrap();
+        theirs.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        manager.register_app_connection(protocol::TOOLS_MISSING_MIN_VERSION, Arc::new(Mutex::new(ours)));
+        let mut app = BufReader::new(theirs);
+        let (old_ours, old_theirs) = Stream::pair().unwrap();
+        old_theirs.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+        manager.register_app_connection(protocol::TOOLS_MISSING_MIN_VERSION - 1, Arc::new(Mutex::new(old_ours)));
+        let mut old_app = BufReader::new(old_theirs);
+
+        let id = manager
+            .create_session("/tmp", "/tmp", Some("sleep 30"), Launch::Profile("claude-code"))
+            .unwrap();
+        spawn_tools_missing_watch(&manager, id.clone());
+
+        let mut next = || loop {
+            match read_message::<_, Response>(&mut app).unwrap() {
+                Some(Response::SessionToolsMissing { id, missing }) => return (id, missing),
+                Some(_) => continue,
+                None => panic!("the app connection closed before the mark was pushed"),
+            }
+        };
+        assert_eq!(next(), (id.clone(), true));
+        note_agent_ready(&manager, &id);
+        assert_eq!(next(), (id.clone(), false));
+        assert!(
+            read_message::<_, Response>(&mut old_app).is_err(),
+            "an app below v81 cannot parse the push and must not be sent it"
+        );
         manager.kill_session(&id).unwrap();
     }
 

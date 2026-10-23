@@ -32,6 +32,8 @@
   import { sshLinks } from "$lib/workspace/sshLinkState";
   import { jumpToBoundSession, revealDevelopingCard } from "$lib/cards/cardRunActions";
   import { developingRunIn, DEVELOPING_BLOCK } from "$lib/cards/developingCards";
+  import { cardWarningText, parentBrokenText } from "$lib/board/cardLint";
+  import { cardLint } from "$lib/board/cardLintState";
   // Svelte 5 self-import for the nested-children recursion.
   import BoardCardSelf from "$lib/board/BoardCard.svelte";
 
@@ -230,6 +232,12 @@
   /// every rated card would say nothing about which of them is unusual.
   const agentOverride = $derived(cardOverrideNote(card));
 
+  // What the card linter says about this card -- named field and reason,
+  // where the chip used to say only "frontmatter has issues". Empty off a
+  // workspace (the drag preview), which leaves the daemon's bare flag.
+  const findings = $derived(workspaceId === null ? [] : ($cardLint[workspaceId]?.byPath.get(card.id) ?? []));
+  const warningText = $derived(cardWarningText(findings, card.parseWarning, card.parseWarnings));
+
   // Deduped by name: frontmatter may list the same label twice, and a
   // keyed each on name would then throw each_key_duplicate.
   const labelChips = $derived(
@@ -411,8 +419,8 @@
         />
       </button>
     {/if}
-    {#if card.parseWarning}
-      <span class="warning" use:tooltip={"This card's frontmatter has issues — some fields may be unreadable"}><TriangleAlert size={11} /></span>
+    {#if warningText}
+      <span class="warning" use:tooltip={warningText}><TriangleAlert size={11} /></span>
     {/if}
     {#if card.kind === "plan" && (card.nestedChildren.length > 0 || nestTargeted)}
       <IconButton
@@ -432,7 +440,7 @@
   </div>
   <div class="title">{card.title}</div>
   {#if card.parent && !nested}
-    <span class="parent-chip" class:broken={card.parentBroken} use:tooltip={card.parentBroken ? `parent: ${card.parent} — file not found in this context` : `Part of the plan "${card.parentTitle}"`}>
+    <span class="parent-chip" class:broken={card.parentBroken} use:tooltip={card.parentBroken ? parentBrokenText(card.parent, findings) : `Part of the plan "${card.parentTitle}"`}>
       {card.parentBroken ? `⚠ ${card.parent}` : card.parentTitle}
     </span>
   {/if}

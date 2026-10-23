@@ -20,6 +20,7 @@
     workspaceRootPath,
     openFileInSplit,
     resolvedAgents,
+    effectiveConfigInputs,
     liveSessionIds,
     agentDefaultsStore,
     agentProfilesStore,
@@ -36,6 +37,7 @@
   } from "$lib/cards/complexity";
   import CardAgentControls from "$lib/cards/CardAgentControls.svelte";
   import { cardAgentSummary } from "$lib/cards/cardAgent";
+  import { effectiveRunForCard, runsOnBreakdown, runsOnLine } from "$lib/agents/effectiveConfig";
   import {
     addAttachment,
     attachmentChipLabel,
@@ -131,6 +133,8 @@
     type CardSituation,
   } from "$lib/cards/cardDetail";
   import * as backend from "$lib/core/backend";
+  import { findingsForCard, parentBrokenShort, PARSE_WARNING_TEXT } from "$lib/board/cardLint";
+  import { cardLint } from "$lib/board/cardLintState";
 
   interface Props {
     card: CardView;
@@ -383,6 +387,9 @@
   }
 
   const nested = $derived(card.parent !== null && card.status === null && !card.parentBroken);
+  // The linter's findings for this card, plus the one rule the tree
+  // cannot answer and this modal can: it has read the body.
+  const lintFindings = $derived(findingsForCard($cardLint[workspaceId], card, content));
   const statusMatchesColumn = $derived(
     card.status !== null && columns.some((c) => slugStatus(c.name) === slugStatus(card.status ?? ""))
   );
@@ -475,6 +482,14 @@
       effectiveTable,
       (id) => $agentProfilesStore.find((p) => p.id === id)?.label ?? id
     )
+  );
+  /// The resolved answer under it, with the layer that decided it: the
+  /// sentence above explains a level or an override, and says nothing at
+  /// all for the ordinary card, which still runs on SOMETHING the human
+  /// had to work out from four settings pages. Task cards only -- a Run
+  /// launches a task as itself, while a plan's work is its children's.
+  const runsOn = $derived(
+    card.kind === "task" ? effectiveRunForCard($effectiveConfigInputs(workspaceId), agentFields) : null
   );
 
   const activeLabelSlugs = $derived(new Set(card.labels.map(slugStatus)));
@@ -1403,7 +1418,7 @@
               </button>
             {:else}
               <span class:broken={card.parentBroken}
-                >{card.parentBroken ? `⚠ ${card.parent} (not found)` : card.parentTitle}</span
+                >{card.parentBroken ? `⚠ ${card.parent} (${parentBrokenShort(lintFindings)})` : card.parentTitle}</span
               >
             {/if}
           </div>
@@ -1414,8 +1429,18 @@
       {:else if cardAgentLine}
         <p class="agent-line">{cardAgentLine}</p>
       {/if}
-      {#if card.parseWarning}
-        <p class="warning">This card's frontmatter has issues — some fields may not be readable.</p>
+      {#if runsOn}
+        <p class="agent-line" title={runsOnBreakdown(runsOn)}>{runsOnLine(runsOn)}</p>
+      {/if}
+      {#each lintFindings as finding (finding.code + finding.message)}
+        <p class="warning">{finding.message}</p>
+      {/each}
+      {#if card.parseWarnings?.length}
+        {#each card.parseWarnings as why (why)}
+          <p class="warning">{why}</p>
+        {/each}
+      {:else if card.parseWarning}
+        <p class="warning">{PARSE_WARNING_TEXT}</p>
       {/if}
       <!-- A queued launch. Above the session bar rather than in it: the
            bar reports a SESSION, and the whole point of this state is

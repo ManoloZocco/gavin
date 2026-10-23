@@ -97,6 +97,12 @@ struct CardView<'a> {
     attachments: &'a [String],
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     parse_warning: bool,
+    /// What is wrong, one line per field: the daemon's `parseWarnings`
+    /// (a value it could not read) plus a `parent:` that nests nothing,
+    /// with the reason. A bare `parseWarning: true` left an agent to guess
+    /// which field to fix, and a broken parent was not flagged at all.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    warnings: Vec<String>,
     /// `gavin_find_cards` only, where it is the order of a list with no
     /// query; on the board it is weight with no use (`summarized`).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -165,10 +171,21 @@ impl<'a> CardView<'a> {
             human_item_counts: BTreeMap::new(),
             attachments: &plan.attachments,
             parse_warning: plan.parse_warning,
+            warnings: plan.parse_warnings.clone(),
             modified_at: plan.modified_at,
             archived: is_archived(plan),
             score: None,
         }
+    }
+
+    /// Adds why `parent:` nests nothing, when it doesn't. The board draws
+    /// such a card loose with a broken mark; an agent reading the tree
+    /// saw a parent name and no sign the link was dead.
+    fn with_parent_check(mut self, ctx: &GavinContext, tree: &GavinTree) -> Self {
+        if let Some(why) = self.parent.and_then(|parent| broken_parent(self.path, parent, ctx, tree)) {
+            self.warnings.push(why);
+        }
+        self
     }
 
     /// The board's form of a card. Its human items become a count per
@@ -186,6 +203,39 @@ impl<'a> CardView<'a> {
         }
         self.modified_at = None;
         self
+    }
+}
+
+/// Why a task's `parent:` does not nest it, or None when it does. The
+/// rule is the card model's: a file name, in the task's own context
+/// folder, naming a plan that is not the task itself.
+fn broken_parent(path: &str, parent: &str, ctx: &GavinContext, tree: &GavinTree) -> Option<String> {
+    let named = |p: &&PlanFileInfo| p.file_name == parent;
+    match ctx.plans.iter().find(named) {
+        Some(p) if p.path == path => Some(format!("parent: `{parent}` is this card itself")),
+        Some(p) if p.kind != CardKind::Plan => Some(format!(
+            "parent: `{parent}` is a {}, and only a plan can hold tasks",
+            match p.kind {
+                CardKind::Task => "task",
+                CardKind::Note => "note",
+                CardKind::Plan => "plan",
+            }
+        )),
+        Some(_) => None,
+        None => {
+            let elsewhere = tree
+                .contexts
+                .iter()
+                .filter(|c| c.folder_path != ctx.folder_path)
+                .find(|c| c.plans.iter().any(|p| named(&p)));
+            Some(match elsewhere {
+                Some(c) => format!(
+                    "parent: `{parent}` lives in the context `{}`; a parent must be in the task's own context",
+                    c.name
+                ),
+                None => format!("parent: no card named `{parent}` in this context"),
+            })
+        }
     }
 }
 
@@ -232,7 +282,7 @@ struct TreeView<'a> {
 }
 
 impl<'a> ContextView<'a> {
-    fn of(ctx: &'a GavinContext) -> Self {
+    fn of(ctx: &'a GavinContext, tree: &'a GavinTree) -> Self {
         let (archived, on_board): (Vec<&PlanFileInfo>, Vec<&PlanFileInfo>) =
             ctx.plans.iter().partition(|p| is_archived(p));
         Self {
@@ -245,7 +295,7 @@ impl<'a> ContextView<'a> {
             config_warning: ctx.config_warning,
             agent: ctx.agent.as_ref(),
             archived_cards: archived.len(),
-            plans: on_board.into_iter().map(|p| CardView::of(p).summarized()).collect(),
+            plans: on_board.into_iter().map(|p| CardView::of(p).with_parent_check(ctx, tree).summarized()).collect(),
             docs: &ctx.docs,
             specs: &ctx.specs,
         }
@@ -254,7 +304,7 @@ impl<'a> ContextView<'a> {
 
 /// `gavin_get_tree`: every context, and every card still on the board.
 pub fn board(tree: &GavinTree) -> String {
-    let contexts: Vec<ContextView> = tree.contexts.iter().map(ContextView::of).collect();
+    let contexts: Vec<ContextView> = tree.contexts.iter().map(|c| ContextView::of(c, tree)).collect();
     let archived: usize = contexts.iter().map(|c| c.archived_cards).sum();
     let view = TreeView {
         root_path: &tree.root_path,
@@ -636,6 +686,7 @@ mod tests {
             checklist_done: 0,
             checklist_total: 0,
             parse_warning: false,
+            parse_warnings: Vec::new(),
             modified_at: None,
             attachments: vec![],
             complexity: None,
@@ -702,6 +753,49 @@ mod tests {
             },
             PlanFileInfo { kind: CardKind::Note, status: None, ..card(&format!("{P}/idea.md"), "Login idea") },
         ])
+    }
+
+    // A dead `parent:` nested nothing and said nothing in the tree; the
+    // card now carries why, the same reasons the board draws.
+    #[test]
+    fn the_tree_says_why_a_parent_nests_nothing() {
+        let mut t = tree(vec![
+            PlanFileInfo { kind: CardKind::Plan, ..card(&format!("{P}/epic.md"), "Epic") },
+            card(&format!("{P}/a-task.md"), "A task"),
+            PlanFileInfo { parent: Some("epic.md".into()), status: None, ..card(&format!("{P}/ok.md"), "Ok") },
+            PlanFileInfo { parent: Some("gone.md".into()), ..card(&format!("{P}/missing.md"), "Missing") },
+            PlanFileInfo { parent: Some("self.md".into()), ..card(&format!("{P}/self.md"), "Self") },
+            PlanFileInfo { parent: Some("a-task.md".into()), ..card(&format!("{P}/on-task.md"), "On a task") },
+            PlanFileInfo { parent: Some("far.md".into()), ..card(&format!("{P}/far-off.md"), "Far off") },
+            PlanFileInfo { parse_warnings: vec!["priority: `x` is not ...".into()], ..card(&format!("{P}/typo.md"), "Typo") },
+        ]);
+        let mut other = t.contexts[0].clone();
+        other.folder_path = "/ws/lib".into();
+        other.name = "lib".into();
+        other.plans = vec![PlanFileInfo { kind: CardKind::Plan, ..card("/ws/lib/.gavin/plans/far.md", "Far") }];
+        t.contexts.push(other);
+
+        let out: Value = serde_json::from_str(&board(&t)).unwrap();
+        let warnings = |title: &str| -> Vec<String> {
+            out["contexts"][0]["plans"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["title"] == title)
+                .and_then(|c| c.get("warnings"))
+                .map(|w| w.as_array().unwrap().iter().map(|s| s.as_str().unwrap().to_string()).collect())
+                .unwrap_or_default()
+        };
+        assert!(warnings("Ok").is_empty());
+        assert!(warnings("Epic").is_empty());
+        assert_eq!(warnings("Missing"), vec!["parent: no card named `gone.md` in this context"]);
+        assert_eq!(warnings("Self"), vec!["parent: `self.md` is this card itself"]);
+        assert_eq!(warnings("On a task"), vec!["parent: `a-task.md` is a task, and only a plan can hold tasks"]);
+        assert_eq!(
+            warnings("Far off"),
+            vec!["parent: `far.md` lives in the context `lib`; a parent must be in the task's own context"]
+        );
+        assert_eq!(warnings("Typo"), vec!["priority: `x` is not ..."]);
     }
 
     fn criteria(args: Value) -> Criteria {

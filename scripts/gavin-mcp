@@ -17,7 +17,8 @@
 #
 # Nothing may reach stdout but the binary's own JSON-RPC -- a stray echo
 # corrupts the stream and the server dies as a parse error. Diagnostics go
-# to stderr.
+# to stderr, and the "no binary found" one also to the gavin-mcp log, which
+# survives the agent UIs that hide an MCP server's stderr.
 
 set -eu
 
@@ -51,6 +52,7 @@ if [ -z "${GAVIN_MCP:-}" ]; then
                         GAVIN_MCP=*)
                             GAVIN_MCP=${line#GAVIN_MCP=}
                             export GAVIN_MCP
+                            pin_dir=$d
                             break 3
                             ;;
                     esac
@@ -99,12 +101,48 @@ fi
 if [ -z "$found" ]; then
     # Name every path tried. The failure an agent otherwise sees is a bare
     # `gavin (CONNECTION_CLOSED)`, which says nothing about what was wrong.
+    tried=""
+    while IFS= read -r candidate; do
+        [ -n "$candidate" ] && tried="$tried$candidate, "
+    done <<EOF
+$candidates
+EOF
+    tried="${tried}gavin-mcp on PATH"
+    remedy="Install Gavin, run \`cargo build -p gavin-mcp\`, or set GAVIN_MCP."
     echo "gavin-mcp: no binary found. Tried, in order:" >&2
     echo "$candidates" | while IFS= read -r candidate; do
         [ -n "$candidate" ] && echo "  $candidate" >&2
     done
     echo "  gavin-mcp on PATH" >&2
-    echo "Install Gavin, run \`cargo build -p gavin-mcp\`, or set GAVIN_MCP." >&2
+    echo "$remedy" >&2
+
+    # And the same, as one line, in the gavin-mcp log -- because most agent
+    # UIs never show an MCP server's stderr. It is the file the binary
+    # appends its own failed-connect diagnosis to (`append_log` in
+    # crates/gavin-mcp), in the binary's line format: `protocol::
+    # app_support_dir` joined with `gavin-mcp.log`, or `gavin-mcp-dev.log`
+    # for the dev daemon's tab. Which daemon opened the tab is read off the
+    # endpoint it injected (`daemon-dev.sock`, pipe `gavin-daemon-dev-sock`)
+    # or the mcp-env-dev pin recovered above. Never stdout, and never a
+    # failure of its own: a missing directory means no gavin has run here,
+    # and nothing would read the line.
+    case "$(uname -s 2>/dev/null)" in
+        Darwin) log_dir="$HOME/Library/Application Support/gavin" ;;
+        *)
+            case "${XDG_DATA_HOME:-}" in
+                /*) log_dir="$XDG_DATA_HOME/gavin" ;;
+                *) log_dir="$HOME/.local/share/gavin" ;;
+            esac
+            ;;
+    esac
+    suffix=""
+    case "${GAVIN_SESSION_SOCKET:-}" in *daemon-dev*) suffix="-dev" ;; esac
+    case "${pin_dir:-}" in */mcp-env-dev) suffix="-dev" ;; esac
+    if [ -d "$log_dir" ]; then
+        stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || stamp="-"
+        echo "$stamp session=${GAVIN_SESSION_ID:--} gavin-mcp: no binary found. Tried, in order: $tried. $remedy" \
+            >>"$log_dir/gavin-mcp$suffix.log" 2>/dev/null || true
+    fi
     exit 1
 fi
 

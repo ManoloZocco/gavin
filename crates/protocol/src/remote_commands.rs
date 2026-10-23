@@ -151,6 +151,10 @@ const REMOTE_COMMAND_TABLE: &[(&str, RemoteAllowance)] = &[
     ("card_session", RemoteAllowance::Allowed),
     ("card_runs", RemoteAllowance::Allowed),
     ("activity_runs", RemoteAllowance::Allowed),
+    // What the desk works out about a workspace, for its agents to read
+    // (v79). The desk's own snapshot: a Device publishing one would
+    // overwrite the diagnosis with whatever a phone's partial view held.
+    ("publish_workspace_insights", RemoteAllowance::Refused),
     ("shell_writes", RemoteAllowance::Allowed),
     // Scheduled tasks (v77). A Device reads the list and its reports,
     // and edits, pauses, duplicates and deletes them on the desk. It
@@ -215,6 +219,7 @@ const REMOTE_COMMAND_TABLE: &[(&str, RemoteAllowance)] = &[
     ("unlink_card_session", RemoteAllowance::Allowed),
     ("promote_checklist_item", RemoteAllowance::Allowed),
     ("set_root_config_field", RemoteAllowance::Allowed),
+    ("set_worktree_setup", RemoteAllowance::Allowed),
     ("get_agent_model_defaults", RemoteAllowance::Allowed),
     ("set_agent_model_default", RemoteAllowance::Allowed),
     ("get_agent_skills_marks", RemoteAllowance::Allowed),
@@ -245,6 +250,10 @@ const REMOTE_COMMAND_TABLE: &[(&str, RemoteAllowance)] = &[
     ("scan_foreign_mcp_servers", RemoteAllowance::Allowed),
     ("agent_profiles", RemoteAllowance::Allowed),
     ("detect_agent_binaries", RemoteAllowance::Allowed),
+    // Reads: whether the Integration step's MCP entry would start, and
+    // the desk's prerequisites -- the same answers its Settings shows.
+    ("mcp_health", RemoteAllowance::Allowed),
+    ("preflight", RemoteAllowance::Allowed),
     ("agent_model_catalog", RemoteAllowance::Allowed),
     ("agent_usage", RemoteAllowance::Allowed),
     ("system_memory", RemoteAllowance::Allowed),

@@ -7,8 +7,11 @@
     missingFromAppFallback,
     suggestFallbackChain,
     suggestMainProfile,
+    withRunnability,
     type DetectedAgent,
   } from "$lib/agents/agentDetect";
+  import { agentVerdicts } from "$lib/agents/prerequisites";
+  import { ensurePreflight, preflightItems, preflightReading } from "$lib/agents/preflightState";
   import { pickPath } from "$lib/workspace/picker";
   import * as backend from "$lib/core/backend";
   import {
@@ -69,9 +72,22 @@
   let fileError = $state<string | null>(null);
   let picking = $state(false);
 
-  let detected = $state<DetectedAgent[] | null>(null);
+  /// The PATH sweep as it came back -- found or not, never run.
+  let swept = $state<DetectedAgent[] | null>(null);
   let sweepError = $state<string | null>(null);
   let appliedSweep = $state(false);
+  // Whether each found CLI actually starts: the prerequisite check's
+  // `--version` probes, asked once per window and shared with Settings
+  // and the Home notice (lc-09). The rows wait for it, because the seed
+  // below picks a primary from them and must not pick one that does not
+  // start. A check that failed answers with no verdicts, which leaves
+  // every row's `runnable` unknown -- the sweep's old behaviour.
+  ensurePreflight();
+  const detected = $derived(
+    swept && $preflightReading !== undefined
+      ? withRunnability(swept, agentVerdicts(preflightItems($preflightReading)))
+      : null
+  );
 
   const foundIds = $derived(
     detected ? new Set(detected.filter((d) => d.found).map((d) => d.id)) : null
@@ -90,21 +106,22 @@
       .detectAgentBinaries()
       .then((rows) => {
         if (cancelled) return;
-        detected = rows;
+        swept = rows;
       })
       .catch((e) => {
         if (cancelled) return;
         sweepError = String(e instanceof Error ? e.message : e);
-        detected = [];
+        swept = [];
       });
     return () => {
       cancelled = true;
     };
   });
 
-  /// Once the PATH sweep lands, seed main + fallback from found agents
-  /// and app settings — but only when this step has not already written
-  /// a command (resume must not fight the human's earlier pick).
+  /// Once the PATH sweep and the probes land, seed main + fallback from
+  /// the found agents that start, and app settings — but only when this
+  /// step has not already written a command (resume must not fight the
+  /// human's earlier pick).
   $effect(() => {
     if (appliedSweep || !detected) return;
     const main = suggestMainProfile({
@@ -212,8 +229,15 @@
   function profileOptionLabel(id: string, label: string): string {
     if (!foundIds || !sweptIds) return label;
     if (!sweptIds.has(id)) return label;
-    return foundIds.has(id) ? `${label} (found)` : `${label} (not found)`;
+    if (!foundIds.has(id)) return `${label} (not found)`;
+    return detected?.find((d) => d.id === id)?.runnable === false
+      ? `${label} (found, does not start)`
+      : `${label} (found)`;
   }
+  /// The chosen profile's row when it was found but did not start.
+  const chosenBroken = $derived(
+    detected?.find((d) => d.id === agentCfg.profileId && d.found && d.runnable === false) ?? null
+  );
 </script>
 
 <h3>Which agent?</h3>
@@ -240,6 +264,8 @@
   {/if}
 {:else if sweepError}
   <p class="warn">{sweepError}</p>
+{:else if swept}
+  <p class="hint">Checking which agent CLIs start…</p>
 {:else}
   <p class="hint">Looking for agent CLIs on PATH…</p>
 {/if}
@@ -265,6 +291,13 @@
   <p class="warn">
     “{$agentProfilesStore.find((p) => p.id === agentCfg.profileId)?.label ?? agentCfg.profileId}”
     was not found on PATH — set the command below, or pick a found profile.
+  </p>
+{:else if chosenBroken}
+  <!-- Found is not runnable: the sweep saw the file, `--version` did not
+       answer. Shown, never chosen for the human (agentDetect.ts). -->
+  <p class="warn">
+    “{chosenBroken.label}” was found but does not start: {chosenBroken.runnableDetail ?? "it did not answer --version"}.
+    Fix the install, or pick another profile.
   </p>
 {/if}
 {#if probedHere}

@@ -51,6 +51,10 @@ export interface SetupProgress {
   /// banner is how it is asked, and "not now" is an answer that ends it --
   /// so it nags until answered, never for ever.
   configured: boolean;
+  /// The steps `configured` is waiting on, in wizard order: what the Home
+  /// banner names, so "3 of 5 done" never leaves the reader to guess which
+  /// two are left. Empty exactly when `configured` is true.
+  missing: SetupStep[];
   /// True while an input the derivation needs has not been read yet.
   /// Every other field then describes only the evidence seen so far and
   /// must not be acted on: a caller that renders "setup unfinished"
@@ -68,6 +72,71 @@ export const PRD_PLACEHOLDERS = {
 } as const;
 
 const MARKER_START = "<!-- gavin:start -->";
+
+/// The host's answer about the agent's MCP entry (`mcp_health`,
+/// `mcp_health.rs`): whether gavin's entry is in the profile's MCP
+/// config, and whether the command it names would start. `runnable` is
+/// null when gavin cannot tell from here -- an ssh workspace, whose
+/// binary is on the host, or a profile with no MCP file to read.
+export interface McpHealth {
+  entryPresent: boolean;
+  command: string | null;
+  runnable: boolean | null;
+  reason: string | null;
+  configFile: string | null;
+}
+
+/// `mcpHealth`'s value while the host is still being asked. A string
+/// rather than `undefined` because the field itself is optional: absent
+/// is an older read path that never asks, and must keep meaning "use the
+/// marker rule", not "wait for an answer that is not coming".
+export const MCP_HEALTH_READING = "reading" as const;
+export type McpHealthReading = McpHealth | typeof MCP_HEALTH_READING;
+
+/// The launcher a gavin checkout's MCP entry names (`MCP_LAUNCHER`,
+/// `agent_setup.rs`).
+const MCP_LAUNCHER = "scripts/gavin-mcp";
+
+/// Whether the Integration step is finished.
+///
+/// The marker block alone used to finish it, and the marker says nothing
+/// about the half that breaks: the MCP entry beside it names an absolute
+/// `gavin-mcp` that dies when the app moves, and a workspace in that
+/// state showed the step green while its agent ran with no gavin tools.
+/// So with a health answer in hand the entry has to be there AND its
+/// command has to start.
+///
+/// `runnable: null` (an ssh workspace, a profile with no MCP file) and an
+/// absent answer (a caller that does not ask) fall back to the marker
+/// rule: gavin being unable to look is not evidence the entry is dead,
+/// and failing the step on it would nag every ssh workspace for ever.
+/// The answer still in flight is the caller's `pending`, not a verdict.
+export function integrationStepDone(
+  agentFileBody: string | null | undefined,
+  health: McpHealthReading | undefined
+): boolean {
+  if (!agentFileBody?.includes(MARKER_START)) return false;
+  if (health === undefined || health === MCP_HEALTH_READING) return true;
+  return health.runnable !== false;
+}
+
+/// What the Integration step says about an entry that will not start, or
+/// null when there is nothing to say. Its button repairs the common case:
+/// re-running integration rewrites gavin's entry to the `gavin-mcp`
+/// beside this app. The launcher is the one case the button cannot fix
+/// -- it writes the launcher again -- so that line names what does.
+export function integrationHealthNote(health: McpHealthReading | undefined): string | null {
+  if (health === undefined || health === MCP_HEALTH_READING || health.runnable !== false) return null;
+  const file = health.configFile ?? "the MCP config";
+  const why = health.reason ?? "it cannot start";
+  if (!health.entryPresent) {
+    return `Your agent would start without gavin's tools: ${why}. Set up integration writes the entry.`;
+  }
+  if (health.command === MCP_LAUNCHER) {
+    return `gavin's entry in ${file} cannot start: ${why}.`;
+  }
+  return `gavin's entry in ${file} names ${health.command ?? "no command"}, which cannot start: ${why}. Set up integration points it at this app's gavin-mcp.`;
+}
 
 export interface SetupInput {
   hasRoot: boolean;
@@ -134,6 +203,11 @@ export interface SetupInput {
   /// (`loadPlaywrightMark`): "not now", or "I've set it up" where gavin
   /// could not check. Read synchronously.
   playwrightMark: PlaywrightMark | undefined;
+  /// The agent's MCP entry as the host found it (`backend.mcpHealth`),
+  /// `"reading"` while the ask is out -- pending, for the file bodies'
+  /// reason. Optional: absent means this caller does not ask, and the
+  /// Integration step keeps its marker rule (`integrationStepDone`).
+  mcpHealth?: McpHealthReading;
 }
 
 /// Whether the Playwright step is finished: the three checks found it
@@ -190,6 +264,37 @@ export const SETUP_STEPS: SetupStep[] = [
 
 const ORDER: SetupStep[] = SETUP_STEPS;
 
+/// The steps outside the nag -- see `configured` for why each one is.
+const UNNAGGED: SetupStep[] = ["launch", "git", "review", "headroom", "memory"];
+
+/// The steps a workspace counts as set up by, in wizard order. The Home
+/// banner counts THESE: it used to read "N of 10" off SETUP_STEPS while
+/// `configured` ignored five of the ten, so "5 of 10 done" could mean
+/// nothing was left at all.
+export const NAGGED_STEPS: SetupStep[] = SETUP_STEPS.filter((s) => !UNNAGGED.includes(s));
+
+/// What each step is called, on the wizard's stepper and in the banner.
+export const SETUP_STEP_LABELS: Record<SetupStep, string> = {
+  agent: "Agent",
+  integration: "Integration",
+  agentSkills: "Matt Pocock's skills",
+  headroom: "Headroom",
+  memory: "Memory",
+  playwright: "Playwright",
+  git: "Git",
+  review: "Review",
+  prd: "PRD",
+  launch: "Launch",
+};
+
+/// The Home banner's line: how many of the steps that matter are done,
+/// and which are left, by name.
+export function setupBannerText(progress: SetupProgress): string {
+  const done = NAGGED_STEPS.length - progress.missing.length;
+  const left = progress.missing.map((s) => SETUP_STEP_LABELS[s]).join(", ");
+  return `${done} of ${NAGGED_STEPS.length} done — still to do: ${left}`;
+}
+
 /// Derived, never stored (W1): a step configured by hand -- or by an
 /// agent -- counts the moment its evidence lands on disk, so no progress
 /// record can disagree with reality.
@@ -198,11 +303,19 @@ export function setupProgress(input: SetupInput): SetupProgress {
     // Every later step writes under the root, so without one nothing can
     // be done yet -- whatever else happens to be true. Settled, not
     // pending: no pending read could change this answer.
-    return { done: [], next: "agent", complete: false, configured: false, pending: false };
+    return {
+      done: [],
+      next: "agent",
+      complete: false,
+      configured: false,
+      missing: [...NAGGED_STEPS],
+      pending: false,
+    };
   }
   const done: SetupStep[] = [];
   if (input.configCommand?.trim()) done.push("agent");
-  if (input.agentFileBody?.includes(MARKER_START)) done.push("integration");
+  // The marker AND, when the host was asked, an MCP entry that starts.
+  if (integrationStepDone(input.agentFileBody, input.mcpHealth)) done.push("integration");
   // S6: a check that found it, the human's word, or their "not now".
   // The third route is why declining once stops the nagging.
   if (agentSkillsDone(input.agentSkills, input.agentSkillsMark)) done.push("agentSkills");
@@ -243,6 +356,7 @@ export function setupProgress(input: SetupInput): SetupProgress {
   const playwrightSettled = playwrightStepSettled(input.playwright, input.playwrightMark);
   const pending =
     input.agentFileBody === undefined ||
+    input.mcpHealth === MCP_HEALTH_READING ||
     input.prdBody === undefined ||
     !agentSkillsSettled ||
     !headroomSettled ||
@@ -257,16 +371,9 @@ export function setupProgress(input: SetupInput): SetupProgress {
   // is left is what the Home banner is allowed to read; `complete` still
   // means all of them, which is what the wizard opens on. Playwright is
   // not on the list: it is the catch-up `configured` describes.
-  const configured = ORDER.every(
-    (s) =>
-      s === "launch" ||
-      s === "git" ||
-      s === "review" ||
-      s === "headroom" ||
-      s === "memory" ||
-      done.includes(s)
-  );
-  return { done: ordered, next, complete: next === null, configured, pending };
+  const missing = NAGGED_STEPS.filter((s) => !done.includes(s));
+  const configured = missing.length === 0;
+  return { done: ordered, next, complete: next === null, configured, missing, pending };
 }
 
 export interface PrdSections {

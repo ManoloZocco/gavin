@@ -51,6 +51,7 @@ import {
   decideLaunch,
   effectiveFallbackChain,
   fallbackBlockedReason,
+  launchLimitGate,
   type FallbackDecision,
 } from "$lib/agents/agentFallback";
 
@@ -547,14 +548,9 @@ export function launchDecision(
     ...(workspaceProfile ? [workspaceProfile] : []),
     ...(workspace?.armedAgents ?? []),
   ]);
-  // No cycle at all means limits are off for an install that configured
-  // nothing — the same early return `pauseFor` takes, so inventing
-  // DEFAULT_CYCLE.limitEnabled for everyone would start pausing installs
-  // that never asked for a pause. A configured fallback chain is asking:
-  // Settings draws the shipped default (limits on) for a primary nobody
-  // ever saved a cycle for, and a chain that never walks because that
-  // cycle was never persisted left Claude spawning over the threshold.
-  const limitEnabled = cycle ? cycle.limitEnabled : chain.length > 0;
+  // No cycle and no chain means limits are off -- the same early return
+  // `pauseFor` takes; `launchLimitGate` says why a chain turns them on.
+  const { limitEnabled, limitPercent } = launchLimitGate(cycle, chain);
   return decideLaunch({
     resolvedProfileId: resolvedProfileId ?? "",
     workspaceProfileId: workspaceProfile,
@@ -563,7 +559,7 @@ export function launchDecision(
     armed,
     declined: new Set(workspace?.declinedAgents ?? []),
     limitEnabled,
-    limitPercent: cycle?.limitPercent ?? DEFAULT_CYCLE.limitPercent,
+    limitPercent,
     fallbackThresholds: get(agentDefaultsStore).fallbackThresholds,
     cyclePaused,
     // Each hop candidate answers to its own cycle, in this workspace.

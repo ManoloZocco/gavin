@@ -62,6 +62,8 @@
     gitTrackingDefault,
   } from "$lib/core/layoutState";
   import { turnVerdictById } from "$lib/agents/turnVerdictState";
+  import { toolsMissingById } from "$lib/agents/toolsMissingState";
+  import { TOOLS_MISSING_TIP } from "$lib/agents/toolsMissing";
   import { verdictAttentionState } from "$lib/agents/verdictAttention";
   import { confirmWorkspaceClose, confirmPageClose } from "$lib/shell/confirmClose";
   // Naming a workspace into existence is the app hub's action now; the
@@ -123,6 +125,7 @@
     agentIndicator,
     agentIndicatorByState,
     gitIndicator,
+    toolsMissingIndicator,
     usageProjectionIndicator,
   } from "$lib/ui/indicators";
 
@@ -890,6 +893,8 @@
       // never name (sessionRead.ts).
       verdict: $turnVerdictById[row.id] ?? null,
       read: $layoutState.readSessionIds?.has(row.id) === true,
+      // Offers "Repair integration" while the no-tools mark is up.
+      toolsMissing: $toolsMissingById[row.id] === true,
     };
   }
 
@@ -1449,6 +1454,19 @@
                     />
                   {:else}
                     <span class="tab-label" ondblclick={() => startEditingSession(row.id)}>{tabRowLabel(row)}</span>
+                  {/if}
+                  <!-- The tab bar's no-gavin-tools mark, on the same row of
+                       the same session (toolsMissing.ts). Its own bubble,
+                       like the card link below: the row's says what the
+                       row is, this says what is wrong and where the
+                       remedy is (the row's menu). -->
+                  {#if row.kind === "session" && $toolsMissingById[row.id]}
+                    <StatusBadge
+                      indicator={toolsMissingIndicator()}
+                      size={9}
+                      tip={TOOLS_MISSING_TIP}
+                      class="tab-tools-missing"
+                    />
                   {/if}
                   {#if gitStatus}
                     <span class="tab-git">

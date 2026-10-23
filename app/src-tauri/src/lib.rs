@@ -22,9 +22,11 @@ mod home;
 mod keep_running;
 mod layout;
 mod mac_window;
+mod mcp_health;
 mod memory;
 mod navigation_guard;
 mod program;
+mod preflight;
 mod pull_request;
 mod remote;
 mod scheduled;
@@ -234,6 +236,7 @@ pub fn run() {
             session::card_session,
             session::card_runs,
             session::activity_runs,
+            session::publish_workspace_insights,
             session::shell_writes,
             scheduled::list_scheduled_tasks,
             scheduled::create_scheduled_task,
@@ -294,6 +297,7 @@ pub fn run() {
             session::unlink_card_session,
             session::promote_checklist_item,
             session::set_root_config_field,
+            session::set_worktree_setup,
             session::get_agent_model_defaults,
             session::set_agent_model_default,
             session::get_agent_skills_marks,
@@ -315,6 +319,8 @@ pub fn run() {
             agent_setup::scan_foreign_mcp_servers,
             agent_setup::agent_profiles,
             agent_setup::detect_agent_binaries,
+            mcp_health::mcp_health,
+            preflight::preflight,
             agent_models::agent_model_catalog,
             agent_usage::agent_usage,
             memory::system_memory,

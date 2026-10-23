@@ -104,8 +104,9 @@ export function provisionalSessionName(title: string): string | null {
 // last part deliberately, because "there is a copy" reads as trivia and
 // "the board never sees it" reads as an instruction.
 //
-// Empty when the card is inside the cwd, which is every board Run: there
-// is no second copy to confuse, and a warning about a hazard that is not
+// Empty when the card is inside the cwd, which is every board Run in the
+// shared checkout (one sent to a worktree of its own is not): there is no
+// second copy to confuse, and a warning about a hazard that is not
 // present is noise that teaches an agent to skim the framing.
 export function cardHomeNote(path: string, cwd: string | null = null): string {
   if (!cardIsOutside(path, cwd)) return "";

@@ -12,6 +12,39 @@ export interface DetectedAgent {
   path: string | null;
   /** Deprecation note when startable but not the preferred binary. */
   warning?: string | null;
+  /// Whether the CLI answered `--version` (the prerequisite check,
+  /// lc-09): false is FOUND BUT NOT RUNNABLE -- a broken install, a shim
+  /// whose runtime is gone -- which the PATH sweep alone reports as
+  /// found. Null or absent when it was not asked or could not say.
+  runnable?: boolean | null;
+  /// What the probe saw when `runnable` is false.
+  runnableDetail?: string | null;
+}
+
+/// The sweep's rows with the prerequisite check's verdict folded in, by
+/// profile id. A row the check has no answer for keeps `runnable`
+/// unknown -- never false, which would bar an agent nobody tested.
+export function withRunnability(
+  detected: readonly DetectedAgent[],
+  verdicts: ReadonlyMap<string, { runnable: boolean | null; detail: string }>
+): DetectedAgent[] {
+  return detected.map((d) => {
+    const v = d.found ? verdicts.get(d.id) : undefined;
+    if (!v) return d;
+    return { ...d, runnable: v.runnable, runnableDetail: v.runnable === false ? v.detail : null };
+  });
+}
+
+/// Found on PATH and not known to be broken: what the wizard may pick
+/// for the human. A CLI that did not answer `--version` is still listed
+/// -- they may know why -- but is never chosen for them.
+export function usableProfileIds(detected: readonly DetectedAgent[]): string[] {
+  return detected.filter((d) => d.found && d.runnable !== false).map((d) => d.id);
+}
+
+/// Profile ids found on PATH that did not start.
+export function brokenProfileIds(detected: readonly DetectedAgent[]): string[] {
+  return detected.filter((d) => d.found && d.runnable === false).map((d) => d.id);
 }
 
 /// Profile ids whose default command resolved on PATH.
@@ -32,7 +65,9 @@ export function isAgentFound(
 /// Prefer keeping a current profile that is found; else the first found id
 /// that already appears in ANY app fallback chain (settings the human
 /// already trusts — a non-empty chain for any primary counts); else the
-/// first found CLI; else leave current alone.
+/// first found CLI; else leave current alone. "Found" here is
+/// `usableProfileIds`: a CLI found but not runnable is never auto-picked,
+/// not even to keep it as the current one.
 /// Never overrides once a command is already on disk — that means the
 /// human finished this step (or wrote it by hand).
 export function suggestMainProfile(input: {
@@ -44,7 +79,7 @@ export function suggestMainProfile(input: {
   const current = input.currentProfileId?.trim() || null;
   if (input.commandAlreadySet) return current;
 
-  const found = new Set(foundProfileIds(input.detected));
+  const found = new Set(usableProfileIds(input.detected));
   if (current && found.has(current)) return current;
 
   for (const chain of Object.values(input.appChains ?? {})) {
@@ -54,7 +89,7 @@ export function suggestMainProfile(input: {
     }
   }
 
-  const firstFound = input.detected.find((d) => d.found)?.id ?? null;
+  const firstFound = usableProfileIds(input.detected)[0] ?? null;
   return firstFound ?? current;
 }
 
@@ -72,7 +107,9 @@ export function suggestFallbackChain(input: {
   const existing = (main ? (input.appChains?.[main] ?? []) : []).map((id) => id.trim()).filter(Boolean);
   if (existing.length > 0) return null;
 
-  return foundProfileIds(input.detected).filter((id) => id !== main);
+  // Usable ones only, for the primary's reason: a chain seeded with a CLI
+  // that does not start is a fallback that fails when it is needed.
+  return usableProfileIds(input.detected).filter((id) => id !== main);
 }
 
 /// Ids from the main profile's app chain that the sweep did not find —
@@ -97,11 +134,15 @@ export function missingFromAppFallback(
 /// One line for the wizard: "Found: Claude Code, Cursor Agent" or a
 /// sentence when nothing resolves.
 export function foundAgentsSummary(detected: readonly DetectedAgent[]): string {
-  const labels = detected.filter((d) => d.found).map((d) => d.label);
-  if (labels.length === 0) {
+  const usable = detected.filter((d) => d.found && d.runnable !== false).map((d) => d.label);
+  const broken = detected.filter((d) => d.found && d.runnable === false).map((d) => d.label);
+  if (usable.length === 0 && broken.length === 0) {
     return "None of gavin's built-in agent CLIs were found on PATH.";
   }
-  return `Found: ${labels.join(", ")}.`;
+  const parts: string[] = [];
+  if (usable.length > 0) parts.push(`Found: ${usable.join(", ")}.`);
+  if (broken.length > 0) parts.push(`Found but not starting: ${broken.join(", ")}.`);
+  return parts.join(" ");
 }
 
 /// Deprecation / migration warnings from the PATH sweep (e.g. legacy

@@ -10,6 +10,7 @@ mod git_status;
 mod git_watch;
 mod headroom;
 mod input;
+mod insights;
 mod kanban;
 mod kimi_trust;
 mod memory_index;

@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 mod cards;
+mod insights;
 mod playwright;
 mod shell_writes;
 
@@ -729,7 +730,9 @@ fn tool_definitions() -> Value {
         { "name": "gavin_init_root", "description": "Initialize .gavin-root (PRD template, plans/docs/specs) in a folder; idempotent, never overwrites.", "inputSchema": { "type": "object", "properties": {
             "path": { "type": "string", "description": "Defaults to the current directory" }
         } } },
-        { "name": "gavin_get_board", "description": "The workspace kanban board: columns (the status vocabulary) and the human's free-form cards. Requires the workspace open in gavin.", "inputSchema": { "type": "object", "properties": {} } },
+        { "name": "gavin_get_effective_config", "description": "Which agent, model, effort and advisor a card in this workspace would launch on — for an unrated card and for each complexity level (trivial, simple, moderate, complex, intricate) — with every value tagged with the layer that decided it (card > complexity > workspace > app > builtin; \"unset\" means gavin passes nothing and the agent CLI's own default applies), each run's fallback chain with the usage percent at which each agent counts as spent (default 90), its pause settings and the percent at which a resume is held (default 95), and whether the complexity table is empty — in which case a card's complexity: rating changes nothing. This is the gavin app's own resolution, the one its launches use, published to the daemon; it is not re-derived here. Read-only: a single card's agent/model/effort is overridden with gavin_set_plan_field, and the complexity table, fallback chains and defaults are the human's, in Settings. Requires the workspace open in the gavin app; says how old the app's snapshot is.", "inputSchema": { "type": "object", "properties": {} } },
+        { "name": "gavin_doctor", "description": "One report of what is wrong with this workspace's gavin setup and what to do about each item, from the gavin app's latest snapshot: the setup steps not done yet; the card linter's findings, split into SAFE fixes — printed as the exact gavin_set_plan_field(path, key, value) calls to make, after which you leave a dated line under each card's ## Comments — and DECISIONS that are the human's, each with the options to offer through gavin_request_human(card, \"decision\", text, options); the [worktree] setup the repo's lockfiles imply against what .gavin-root/config.toml declares and whether it is approved (a proposal is filed with gavin_propose_worktree_setup — never written or run by you); a note when no complexity level is mapped; and how old the snapshot is. Changes nothing itself. Run it when a board, a launch or a new worktree behaves unexpectedly, and before tidying cards. Requires the workspace open in the gavin app.", "inputSchema": { "type": "object", "properties": {} } },
+        { "name": "gavin_get_board", "description": "The workspace kanban board: its columns (the status vocabulary, `position` is their order and the highest is the done column rails read) and its label vocabulary. The cards themselves are in gavin_get_tree. Requires the workspace open in gavin.", "inputSchema": { "type": "object", "properties": {} } },
         { "name": "gavin_promote_task", "description": "Promote a plan's checklist item into a nested task card (rewrites the item into a link to the new file).", "inputSchema": { "type": "object", "properties": {
             "plan_path": { "type": "string" },
             "item": { "type": "string", "description": "The checklist item's exact text" }
@@ -762,6 +765,9 @@ fn tool_definitions() -> Value {
         { "name": "gavin_delete_tool", "description": "Delete one of THIS WORKSPACE'S tools. Refused for a `builtin:` id (gavin's own), a global tool and another workspace's. A rail step still pointing at the tool is allowed to stall rather than blocking the delete — that stall is visible and repairable. Requires the workspace open in gavin.", "inputSchema": { "type": "object", "properties": {
             "id": { "type": "string", "description": "The tool's id, as gavin_get_tools reports it" }
         }, "required": ["id"] } },
+        { "name": "gavin_propose_worktree_setup", "description": "Propose this workspace's `[worktree] setup`: the install commands every NEW WORKTREE gavin cuts runs before an agent starts in it, joined with ` && ` in one shell at the new checkout's root (a failure stops the rest and the agent). Use it when the workspace declares none and its worktrees start without dependencies installed. Derive the lines from the lockfiles the repo actually carries — `package-lock.json` → `npm ci`, `pnpm-lock.yaml` → `pnpm install --frozen-lockfile`, `yarn.lock` → `yarn install --frozen-lockfile`, `Cargo.lock` → `cargo fetch`, `uv.lock` → `uv sync`, `poetry.lock` → `poetry install` — and write a nested package as a subshell, `(cd app && npm ci)`: a bare `cd` would move every later line and the agent with it. Nothing runs now: the lines stay switched OFF until the human approves them in the workspace Settings (gavin's trust gate), and gavin asks again after any later edit. Written into .gavin-root/config.toml ONLY when it has no `[worktree] setup` key yet — a key that already exists, even an empty list, is the human's and is never overwritten by this tool; the reply then shows the lines already declared.", "inputSchema": { "type": "object", "properties": {
+            "lines": { "type": "array", "description": "The commands, one per entry, in the order they should run. Each a single line; at most 32", "items": { "type": "string" } }
+        }, "required": ["lines"] } },
         { "name": "gavin_spawn_session", "description": "Spawn a terminal session in the gavin app (visible to the human on the Agents page). Requires the workspace open in gavin.", "inputSchema": { "type": "object", "properties": {
             "command": { "type": "string", "description": "Program to run, e.g. claude" },
             "cwd": { "type": "string", "description": "Defaults to the workspace root" }
@@ -860,6 +866,15 @@ fn dispatch_tool(
         return get_orchestration(root, transport);
     }
 
+    // What the app works out about this workspace (v79), read back from
+    // the daemon; both tools only say the snapshot in an agent's terms.
+    if name == "gavin_get_effective_config" {
+        return insights::get_effective_config(root, transport);
+    }
+    if name == "gavin_doctor" {
+        return insights::doctor(root, transport);
+    }
+
     // Its own path for the same reason `gavin_get_orchestration` has
     // one: it is not one request but a read, a decision and a write.
     if name == "gavin_start_rail" {
@@ -882,6 +897,9 @@ fn dispatch_tool(
     }
     if name == "gavin_delete_tool" {
         return delete_tool(root, &require_arg(args, "id")?, transport);
+    }
+    if name == "gavin_propose_worktree_setup" {
+        return propose_worktree_setup(root, args, transport);
     }
 
     let req = match name {
@@ -1075,17 +1093,76 @@ fn dispatch_tool(
         Response::SessionCreated { id, .. } => {
             Ok(format!("spawned session {id} — visible on the Agents page in gavin"))
         }
-        Response::PlanFieldSet { path } => Ok(match requested_path {
-            Some(before) if before != path => {
-                let carried = nested_children_titles(root, &path, transport);
-                moved_card_note(&path, &carried)
-            }
-            _ => "ok".to_string(),
-        }),
+        Response::PlanFieldSet { path } => {
+            let reply = match requested_path {
+                Some(before) if before != path => {
+                    let carried = nested_children_titles(root, &path, transport);
+                    moved_card_note(&path, &carried)
+                }
+                _ => "ok".to_string(),
+            };
+            Ok(match status_written(&req) {
+                Some(status) => match unknown_status_note(root, status, transport) {
+                    Some(note) => format!("{reply} — {note}"),
+                    None => reply,
+                },
+                None => reply,
+            })
+        }
         Response::Ok => Ok("ok".to_string()),
         Response::Error { message } => Err(anyhow::anyhow!(message)),
         other => Err(anyhow::anyhow!("unexpected response: {other:?}")),
     }
+}
+
+/// The status a `gavin_set_plan_field` call wrote, when it wrote one.
+fn status_written(req: &Request) -> Option<&str> {
+    match req {
+        Request::SetPlanFrontmatterField { key, value, .. } if key == "status" && !value.trim().is_empty() => {
+            Some(value.as_str())
+        }
+        _ => None,
+    }
+}
+
+/// The board's column match: lowercase, every run of anything else one
+/// dash (`slugStatus` in the app), so "to do" and "To Do" are one column.
+fn status_slug(s: &str) -> String {
+    let mut slug = String::new();
+    for c in s.to_lowercase().chars() {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c);
+        } else if !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    slug.trim_matches('-').to_string()
+}
+
+/// Said when a written status matches no column. The write still stands
+/// -- a new column may be what was meant -- but status is free text, so a
+/// typo used to make a column of its own with nothing said to the agent
+/// that wrote it. Silent on any failure to read the board: this is a
+/// courtesy on a write that already succeeded.
+fn unknown_status_note(root: &Path, status: &str, transport: &mut dyn DaemonTransport) -> Option<String> {
+    let columns = match transport.request(&Request::GetBoardByRoot { root_path: root.to_string_lossy().to_string() }) {
+        Ok(Response::Board { columns, .. }) => columns,
+        _ => return None,
+    };
+    if columns.is_empty() {
+        return None;
+    }
+    let wanted = status_slug(status);
+    if columns.iter().any(|c| status_slug(&c.name) == wanted) {
+        return None;
+    }
+    let mut names: Vec<&protocol::Column> = columns.iter().collect();
+    names.sort_by_key(|c| c.position);
+    let list = names.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", ");
+    Some(format!(
+        "note: `{status}` matches no column, so the board shows it as a new column of its own. \
+         The columns are: {list}. If that was not meant, write one of them instead."
+    ))
 }
 
 /// Search results as an agent reads them: the fact first, everything
@@ -1416,7 +1493,7 @@ fn get_orchestration(root: &Path, transport: &mut dyn DaemonTransport) -> anyhow
         other => return Err(anyhow::anyhow!("unexpected response: {other:?}")),
     };
 
-    let tree = match transport.request(&Request::ScanGavinRoot { root_path: root_str })? {
+    let tree = match transport.request(&Request::ScanGavinRoot { root_path: root_str.clone() })? {
         Response::GavinTreeScanned { tree } => tree,
         Response::Error { message } => return Err(anyhow::anyhow!(message)),
         other => return Err(anyhow::anyhow!("unexpected response: {other:?}")),
@@ -1433,11 +1510,19 @@ fn get_orchestration(root: &Path, transport: &mut dyn DaemonTransport) -> anyhow
     let rail_run_of: HashMap<&str, &protocol::RailRun> =
         rail_runs.iter().map(|r| (r.rail_id.as_str(), r)).collect();
 
-    // One GitDirtyPaths per DISTINCT worktree: several rails may share
+    // The checkout a rail's steps run in: its worktree, or the ROOT
+    // checkout for an unbound rail. The unbound rail shares the root with
+    // every other unbound rail and with every board run, so it is the one
+    // most likely to collide -- and it used to arrive with no dirty paths
+    // at all, as if its checkout were clean.
+    let checkout_of =
+        |rail: &protocol::Rail| rail.worktree_path.clone().unwrap_or_else(|| root_str.clone());
+
+    // One GitDirtyPaths per DISTINCT checkout: several rails may share
     // one, and re-running git per rail would be pure waste.
     let mut dirty: HashMap<String, (Vec<String>, bool)> = HashMap::new();
     for rail in &rails {
-        let Some(path) = rail.worktree_path.clone() else { continue };
+        let path = checkout_of(rail);
         if dirty.contains_key(&path) {
             continue;
         }
@@ -1468,12 +1553,7 @@ fn get_orchestration(root: &Path, transport: &mut dyn DaemonTransport) -> anyhow
     let rails_json: Vec<Value> = rails
         .iter()
         .map(|rail| {
-            let (paths, truncated) = rail
-                .worktree_path
-                .as_ref()
-                .and_then(|p| dirty.get(p))
-                .cloned()
-                .unwrap_or_default();
+            let (paths, truncated) = dirty.get(&checkout_of(rail)).cloned().unwrap_or_default();
             let stages: Vec<Value> = rail
                 .stages
                 .iter()
@@ -1525,6 +1605,10 @@ fn get_orchestration(root: &Path, transport: &mut dyn DaemonTransport) -> anyhow
                 "worktreePath": rail.worktree_path,
                 "branch": rail.branch,
                 "pageId": rail.page_id,
+                // The human's opt-in to hold this rail on a live conflict
+                // (v81). Shown so an agent rewriting the rails wholesale
+                // can carry it through rather than silently clear it.
+                "holdOnLiveConflict": rail.hold_on_live_conflict,
                 "state": rail_run_of.get(rail.id.as_str()).map(|r| r.state.clone())
                     .unwrap_or_else(|| "idle".to_string()),
                 "dirtyPaths": paths,
@@ -1851,6 +1935,78 @@ fn delete_tool(root: &Path, id: &str, transport: &mut dyn DaemonTransport) -> an
         Response::Ok => Ok(format!(
             "deleted tool {id} — any rail step still pointing at it will stall with \u{201c}tool is no longer in the library\u{201d}"
         )),
+        Response::Error { message } => Err(anyhow::anyhow!(message)),
+        other => Err(anyhow::anyhow!("unexpected response: {other:?}")),
+    }
+}
+
+// ---------- proposing the worktree setup ----------
+
+/// The lines an agent passed, as written: an array of strings, or one
+/// string meaning one line (the mistake an agent actually makes). Blank
+/// entries are not dropped here -- the daemon refuses them by number, and
+/// an agent told "line 2 is blank" can fix its call.
+fn setup_lines_arg(args: &Value) -> anyhow::Result<Vec<String>> {
+    let lines: Vec<String> = match args.get("lines") {
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| anyhow::anyhow!("lines: every entry must be a string, not {v}"))
+            })
+            .collect::<anyhow::Result<_>>()?,
+        Some(Value::String(one)) => vec![one.clone()],
+        _ => anyhow::bail!("missing required argument: lines"),
+    };
+    if lines.iter().all(|l| l.trim().is_empty()) {
+        anyhow::bail!(
+            "lines is empty -- there is nothing to propose. This tool never removes a declared setup; that is the human's, in Settings"
+        );
+    }
+    Ok(lines)
+}
+
+fn indented(lines: &[String]) -> String {
+    lines.iter().map(|l| format!("  {l}")).collect::<Vec<_>>().join("\n")
+}
+
+/// `gavin_propose_worktree_setup`: always the `only_if_absent` write --
+/// the only form the daemon lets an agent send -- so a declared value,
+/// approved or not, is never replaced from here. The reply says, either
+/// way, that the lines do not run until the human approves them: an agent
+/// that reads "written" as "installed" would go on to launch work in a
+/// worktree that still has nothing in it.
+fn propose_worktree_setup(root: &Path, args: &Value, transport: &mut dyn DaemonTransport) -> anyhow::Result<String> {
+    let lines = setup_lines_arg(args)?;
+    let resp = transport.request(&Request::SetWorktreeSetup {
+        root_path: root.to_string_lossy().to_string(),
+        lines,
+        only_if_absent: true,
+    })?;
+    match resp {
+        Response::WorktreeSetupWritten { written: true, lines } => Ok(format!(
+            "proposed [worktree] setup in .gavin-root/config.toml:\n{}\n\
+             These lines are switched OFF: gavin runs none of them until the human approves them \
+             in the workspace Settings (the trust gate shows them a banner). Worktrees cut before \
+             that start without them. Nothing more is needed from you; mention the proposal in \
+             your summary so they know to look.",
+            indented(&lines)
+        )),
+        Response::WorktreeSetupWritten { written: false, lines } => Ok(if lines.is_empty() {
+            "not written: .gavin-root/config.toml already declares [worktree] setup as an empty \
+             list — the human chose no setup, and this tool never overwrites a declared value. \
+             If you think worktrees need one, ask them with gavin_request_human instead."
+                .to_string()
+        } else {
+            format!(
+                "not written: .gavin-root/config.toml already declares [worktree] setup, and this \
+                 tool never overwrites a declared value. Declared now:\n{}\n\
+                 If that is wrong, ask the human with gavin_request_human rather than writing it \
+                 yourself; whether these lines run is up to their approval in Settings.",
+                indented(&lines)
+            )
+        }),
         Response::Error { message } => Err(anyhow::anyhow!(message)),
         other => Err(anyhow::anyhow!("unexpected response: {other:?}")),
     }
@@ -2991,6 +3147,7 @@ mod tests {
             checklist_done: 0,
             checklist_total: 0,
             parse_warning: false,
+            parse_warnings: Vec::new(),
             modified_at: None,
             attachments: vec![],
             complexity: None,
@@ -3195,6 +3352,7 @@ mod tests {
             worktree_path: None,
             branch: None,
             auto_resume: None,
+            hold_on_live_conflict: None,
             trigger: None,
             page_id: None,
             stages,
@@ -3419,6 +3577,61 @@ mod tests {
         );
     }
 
+    fn call_no_args(tool: &str, transport: &mut dyn DaemonTransport) -> (String, bool) {
+        let line = format!(r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"{tool}","arguments":{{}}}}}}"#);
+        let reply = handle_line(&line, Some(Path::new("/ws")), transport).unwrap();
+        let v: Value = serde_json::from_str(&reply).unwrap();
+        (
+            v.pointer("/result/content/0/text").unwrap().as_str().unwrap().to_string(),
+            v.pointer("/result/isError").unwrap().as_bool().unwrap(),
+        )
+    }
+
+    /// Against a daemon older than v79 neither insights tool puts a byte
+    /// on the wire, and the agent is told which tool, which version and
+    /// what to do -- not "unexpected response".
+    #[test]
+    fn the_insights_tools_are_gated_on_a_daemon_that_keeps_insights() {
+        let needed = protocol::min_version_for(&Request::GetWorkspaceInsights { root_path: "/ws".into() });
+        assert_eq!(needed, 79);
+        for tool in ["gavin_get_effective_config", "gavin_doctor"] {
+            let (path, seen, _dir) = fake_daemon(needed - 1, vec![]);
+            let mut t = SocketTransport::at(path);
+            let (text, is_error) = call_no_args(tool, &mut t);
+            assert!(is_error, "{text}");
+            assert!(text.contains(tool), "{text}");
+            assert!(text.contains(&format!("v{needed}")), "{text}");
+            assert!(text.contains("restart the daemon"), "{text}");
+            assert!(
+                !seen.lock().unwrap().iter().any(|r| matches!(r, Request::GetWorkspaceInsights { .. })),
+                "a gated read must produce nothing on the wire"
+            );
+        }
+    }
+
+    #[test]
+    fn the_doctor_reads_its_own_roots_snapshot_through_tools_call() {
+        let published = Response::WorkspaceInsights {
+            insights: Some(json!({
+                "version": 1,
+                "setup": { "configured": true, "missing": [] },
+                "lint": { "findings": [], "findingsTotal": 0, "safeFixes": [] },
+            })),
+            published_at: Some(insights::now_secs()),
+        };
+        let mut t = mock(vec![published]);
+        let (text, is_error) = call_no_args("gavin_doctor", &mut t);
+        assert!(!is_error, "{text}");
+        assert!(text.starts_with("gavin doctor — /ws."), "{text}");
+        assert!(text.contains("Cards: the linter found nothing."), "{text}");
+        assert!(matches!(&t.requests[..], [Request::GetWorkspaceInsights { root_path }] if root_path == "/ws"));
+
+        let mut t = mock(vec![Response::WorkspaceInsights { insights: None, published_at: None }]);
+        let (text, is_error) = call_no_args("gavin_get_effective_config", &mut t);
+        assert!(is_error, "{text}");
+        assert!(text.contains("open in the gavin app"), "{text}");
+    }
+
     fn orchestration_reply() -> Response {
         Response::Orchestration {
             rails: vec![protocol::Rail {
@@ -3428,6 +3641,7 @@ mod tests {
                 worktree_path: Some("/x/wt-a".into()),
                 branch: Some("feature/api".into()),
                 auto_resume: None,
+                hold_on_live_conflict: None,
                 trigger: None,
                 page_id: None,
                 stages: vec![protocol::Stage {
@@ -3702,6 +3916,114 @@ mod tests {
         );
     }
 
+    // ---------- gavin_propose_worktree_setup ----------
+
+    /// The tool only ever sends the proposal form, against the workspace
+    /// root, with the lines as the agent wrote them -- and the reply says
+    /// the lines are OFF until the human approves them.
+    #[test]
+    fn proposing_a_setup_writes_only_if_absent_and_says_it_is_switched_off() {
+        let mut t = mock(vec![Response::WorktreeSetupWritten {
+            written: true,
+            lines: vec!["npm ci".into(), "(cd app && npm ci)".into()],
+        }]);
+        let text = call_with(
+            "gavin_propose_worktree_setup",
+            json!({ "lines": ["npm ci", "(cd app && npm ci)"] }),
+            &mut t,
+        );
+        match &t.requests[0] {
+            Request::SetWorktreeSetup { root_path, lines, only_if_absent } => {
+                assert_eq!(root_path, "/ws");
+                assert_eq!(lines, &vec!["npm ci".to_string(), "(cd app && npm ci)".to_string()]);
+                assert!(*only_if_absent, "the tool must never send the overwriting form");
+            }
+            other => panic!("wrong request: {other:?}"),
+        }
+        assert!(text.contains("  (cd app && npm ci)"), "{text}");
+        assert!(text.contains("switched OFF"), "{text}");
+        assert!(text.contains("approves them"), "{text}");
+    }
+
+    /// A declared value wins, and the agent is shown it -- including the
+    /// empty list a human uses to say "no setup".
+    #[test]
+    fn a_declared_setup_is_shown_back_instead_of_overwritten() {
+        let mut t = mock(vec![Response::WorktreeSetupWritten { written: false, lines: vec!["make deps".into()] }]);
+        let text = call_with("gavin_propose_worktree_setup", json!({ "lines": ["npm ci"] }), &mut t);
+        assert!(text.starts_with("not written"), "{text}");
+        assert!(text.contains("never overwrites"), "{text}");
+        assert!(text.contains("  make deps"), "the human's lines are shown: {text}");
+
+        let mut t = mock(vec![Response::WorktreeSetupWritten { written: false, lines: vec![] }]);
+        let text = call_with("gavin_propose_worktree_setup", json!({ "lines": "npm ci" }), &mut t);
+        assert!(text.contains("empty"), "{text}");
+        match &t.requests[0] {
+            Request::SetWorktreeSetup { lines, .. } => assert_eq!(lines, &vec!["npm ci".to_string()], "one string is one line"),
+            other => panic!("wrong request: {other:?}"),
+        }
+    }
+
+    /// Nothing to propose never reaches the daemon; a daemon refusal (a
+    /// line break, too many lines) reaches the agent verbatim.
+    #[test]
+    fn a_bad_proposal_is_refused_with_its_reason() {
+        for args in [json!({}), json!({ "lines": [] }), json!({ "lines": ["  "] }), json!({ "lines": [1] })] {
+            let mut t = mock(vec![]);
+            let line = json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": { "name": "gavin_propose_worktree_setup", "arguments": args },
+            })
+            .to_string();
+            let reply: Value = serde_json::from_str(&handle_line(&line, Some(Path::new("/ws")), &mut t).unwrap()).unwrap();
+            assert_eq!(reply.pointer("/result/isError"), Some(&json!(true)), "{args}");
+            assert!(
+                !t.requests.iter().any(|r| matches!(r, Request::SetWorktreeSetup { .. })),
+                "{args}: nothing to propose must not be sent"
+            );
+        }
+
+        let mut t = mock(vec![Response::Error { message: "[worktree] setup line 1 holds a line break or control character".into() }]);
+        let text = call_with("gavin_propose_worktree_setup", json!({ "lines": ["npm ci\nrm -rf ~"] }), &mut t);
+        assert!(text.contains("line break"), "{text}");
+    }
+
+    /// The write is gated on the version that introduced it: an older
+    /// daemon answers with the version to update to, and the write never
+    /// leaves.
+    #[test]
+    fn the_setup_proposal_never_reaches_a_daemon_that_predates_it() {
+        let needed = protocol::min_version_for(&Request::SetWorktreeSetup {
+            root_path: "/ws".into(),
+            lines: vec![],
+            only_if_absent: true,
+        });
+        let (path, seen, _dir) = fake_daemon(needed - 1, vec![]);
+        let mut t = SocketTransport::at(path);
+        let text = call_with("gavin_propose_worktree_setup", json!({ "lines": ["npm ci"] }), &mut t);
+        assert!(text.contains(&format!("v{needed}")), "{text}");
+        let seen = seen.lock().unwrap();
+        assert!(!seen.iter().any(|r| matches!(r, Request::SetWorktreeSetup { .. })), "{seen:?}");
+    }
+
+    /// The description is the only documentation an agent reads: it must
+    /// say when the lines run, that they are off until approved, and that
+    /// a declared value is never overwritten.
+    #[test]
+    fn the_setup_tool_description_names_the_gate_and_the_no_overwrite_rule() {
+        let tools = tool_definitions();
+        let tool = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "gavin_propose_worktree_setup")
+            .expect("the tool is listed");
+        let description = tool["description"].as_str().unwrap();
+        for needle in ["NEW WORKTREE", "before an agent starts", "switched OFF", "approves them", "never overwritten", "(cd app && npm ci)"] {
+            assert!(description.contains(needle), "missing {needle:?}: {description}");
+        }
+    }
+
     fn tools_reply() -> Response {
         Response::Tools {
             tools: vec![protocol::ToolDef {
@@ -3787,6 +4109,43 @@ mod tests {
         assert_eq!(text["tools"][0]["scope"], "global");
         assert_eq!(text["tools"][0]["params"][0]["default"], "origin");
         assert!(text["tools"][0]["body"].is_null(), "bodies stay out of the payload");
+    }
+
+    /// An unbound rail runs in the ROOT checkout, so its dirty paths are
+    /// the root's -- the rail sharing the checkout with every board run is
+    /// the one that most needs them, and it used to get an empty list.
+    #[test]
+    fn get_orchestration_gives_an_unbound_rail_the_root_checkouts_dirty_paths() {
+        let root = Path::new("/ws");
+        let mut orchestration = orchestration_reply();
+        if let Response::Orchestration { rails, .. } = &mut orchestration {
+            rails[0].worktree_path = None;
+        }
+        let mut t = mock(vec![
+            orchestration,
+            board_reply(),
+            tools_reply(),
+            Response::GavinTreeScanned { tree: two_card_tree() },
+            Response::DirtyPaths { paths: vec!["src/main.rs".into()], truncated: true },
+        ]);
+        let reply = handle_line(
+            r#"{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"gavin_get_orchestration","arguments":{}}}"#,
+            Some(root),
+            &mut t,
+        )
+        .unwrap();
+
+        match &t.requests[4] {
+            Request::GitDirtyPaths { cwd, .. } => assert_eq!(cwd, "/ws"),
+            other => panic!("wrong request: {other:?}"),
+        }
+        let envelope: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        let text: serde_json::Value =
+            serde_json::from_str(envelope["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert!(text["rails"][0]["worktreePath"].is_null());
+        assert!(text["rails"][0]["holdOnLiveConflict"].is_null(), "never opted in");
+        assert_eq!(text["rails"][0]["dirtyPaths"][0], "src/main.rs");
+        assert_eq!(text["rails"][0]["dirtyTruncated"], true);
     }
 
     #[test]
@@ -4395,6 +4754,52 @@ mod tests {
             &mut t,
         );
         assert!(matches!(&t.requests[0], Request::SetPlanFrontmatterField { value, .. } if value.is_empty()));
+    }
+
+    fn columns(names: &[&str]) -> Response {
+        Response::Board {
+            columns: names
+                .iter()
+                .enumerate()
+                .map(|(i, n)| protocol::Column { id: format!("c{i}"), name: (*n).into(), position: i as i64 })
+                .collect(),
+            labels: vec![],
+            card_sessions: vec![],
+        }
+    }
+
+    // Status is free text: a typo makes a column of its own. The write
+    // still stands, and the reply now says so and names the columns.
+    #[test]
+    fn set_plan_field_says_when_a_status_matches_no_column() {
+        let board = || columns(&["To Do", "In Progress", "Review", "Done"]);
+        let mut t = mock(vec![Response::PlanFieldSet { path: "/ws/.gavin-root/plans/a.md".into() }, board()]);
+        let text = call_with(
+            "gavin_set_plan_field",
+            json!({ "path": ".gavin-root/plans/a.md", "key": "status", "value": "Reveiw" }),
+            &mut t,
+        );
+        assert!(text.starts_with("ok — note: `Reveiw` matches no column"), "{text}");
+        assert!(text.contains("To Do, In Progress, Review, Done"), "{text}");
+        assert!(matches!(&t.requests[1], Request::GetBoardByRoot { .. }));
+
+        // Case and spacing are the board's own match: no note.
+        let mut t = mock(vec![Response::PlanFieldSet { path: "/ws/.gavin-root/plans/a.md".into() }, board()]);
+        let text = call_with(
+            "gavin_set_plan_field",
+            json!({ "path": ".gavin-root/plans/a.md", "key": "status", "value": " review " }),
+            &mut t,
+        );
+        assert_eq!(text, "ok");
+
+        // Not a status write: the board is never read.
+        let mut t = mock(vec![Response::PlanFieldSet { path: "/ws/.gavin-root/plans/a.md".into() }]);
+        call_with(
+            "gavin_set_plan_field",
+            json!({ "path": ".gavin-root/plans/a.md", "key": "priority", "value": "high" }),
+            &mut t,
+        );
+        assert_eq!(t.requests.len(), 1);
     }
 
     /// The search tool asks for this workspace's root, takes topics as

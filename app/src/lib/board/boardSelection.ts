@@ -14,6 +14,7 @@ import { writable, get } from "svelte/store";
 import type { CardView } from "$lib/core/planBoard";
 import { count } from "$lib/orchestration/railConfirm";
 import { estimateLines, type LaunchEstimate } from "$lib/agents/launchEstimate";
+import { checkoutShareChoice, type CheckoutShare } from "$lib/board/columnRunAction";
 
 /// Card paths, in the order they were picked.
 export const boardSelection = writable<string[]>([]);
@@ -65,6 +66,8 @@ export interface SelectionRunPrompt {
   title: string;
   lines: string[];
   confirmLabel: string;
+  /// "Each in its own worktree", or null -- see `columnRunAllConfirm`.
+  worktreeLabel: string | null;
 }
 
 export function selectionRunConfirm(
@@ -72,16 +75,22 @@ export function selectionRunConfirm(
   /// What this press is projected to cost (launchEstimate.ts). Optional
   /// so a test about the selection arithmetic need not build a machine
   /// sample; the bar always passes one.
-  estimate?: LaunchEstimate | null
+  estimate?: LaunchEstimate | null,
+  /// Who already works in the checkout. A selection runs, never
+  /// resumes, so it can always be offered worktrees of its own.
+  share?: CheckoutShare | null
 ): SelectionRunPrompt {
   const n = targets.length;
+  const shared = checkoutShareChoice(share, n, true);
   return {
     title: `Run ${count(n, "selected card")}?`,
     lines: [
       `Each one starts its own agent, one after another.`,
       `Runs: ${targets.map((c) => c.title).join(", ")}.`,
+      ...shared.lines,
       ...(estimate ? estimateLines(estimate) : []),
     ],
     confirmLabel: `Run ${count(n, "card")}`,
+    worktreeLabel: shared.worktreeLabel,
   };
 }

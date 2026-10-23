@@ -18,6 +18,8 @@ import {
   addRail,
   renameRail,
   setRailAutoResume,
+  setRailHoldOnLiveConflict,
+  detectConflicts,
   setRailTrigger,
   bindRail,
   deleteRail,
@@ -58,6 +60,9 @@ import {
   conflictCheckout,
   railRunsDiffer,
 } from "$lib/orchestration/orchestration";
+import { isLiveConflictHoldStall, liveConflictHold } from "$lib/orchestration/liveConflictHold";
+import type { GavinTree } from "$lib/core/gavin";
+import type { WorktreeInfo } from "$lib/git/git";
 import type {
   Action,
   CardEntry,
@@ -136,6 +141,7 @@ import { stepsFromTemplate } from "$lib/orchestration/orchestrationGroups";
 import type { GroupTemplate } from "$lib/orchestration/orchestrationGroups";
 import { fetchTools, libraryFor, toolRecords } from "$lib/orchestration/toolsState";
 import { kanbanState, cardSessionFor, linkCardSessionAction } from "$lib/board/kanbanState";
+import { commitBodyForCheckout } from "$lib/git/sharedCommitState";
 import { breakOutChildren, guardCompletion } from "$lib/cards/cardCompletion";
 import { gavinTrees, patchPlanField, worktreeSetups } from "$lib/core/gavinState";
 import { gitStore, refresh as refreshGit } from "$lib/git/gitState";
@@ -908,7 +914,55 @@ export async function resetRail(workspaceId: string, railId: string): Promise<vo
 /// A stalled step returns to pending with its reason cleared; the next
 /// tick re-reads the card and re-checks the worktree rather than
 /// replaying the old command (spec §6.2).
+/// The live same-worktree conflicts the human confirmed in THIS window,
+/// by `liveConflictKey` (lc-06). Per window and in memory, like the
+/// conflicts box's dismissals: a confirmation answers the collision this
+/// human saw here, and a third agent joining it is a new key that asks
+/// again. Never persisted -- a hold that came back after a reload asks
+/// once more, which is the safe direction for a wait.
+const acknowledgedLiveConflicts = new Set<string>();
+
+/// What `nextActions` reads to apply a rail's live-conflict hold: the
+/// conflicts, computed only when some rail opted in -- every other
+/// workspace gets the O4 scheduler and pays nothing for the feature.
+function liveConflictsFor(
+  orch: Orchestration,
+  tree: GavinTree | undefined,
+  worktrees: WorktreeInfo[] | null
+): { conflicts: ReturnType<typeof detectConflicts>; acknowledged: ReadonlySet<string> } {
+  if (!orch.rails.some((r) => r.holdOnLiveConflict === true)) {
+    return { conflicts: [], acknowledged: acknowledgedLiveConflicts };
+  }
+  return { conflicts: detectConflicts(orch, tree, worktrees), acknowledged: acknowledgedLiveConflicts };
+}
+
+/// A Retry on a step the live-conflict hold stalled IS the confirmation:
+/// record the conflict holding it as acknowledged, so rule 2 lets the
+/// launch through. True when it did. A hold whose conflict has gone
+/// meanwhile has nothing to acknowledge, and the ordinary Retry below
+/// launches it anyway. Returns the held step's rail, or null for any
+/// other step.
+function confirmLiveConflictHold(workspaceId: string, stepId: string): Rail | null {
+  const orch = get(orchestrations)[workspaceId];
+  const run = orch?.stepRuns.find((r) => r.stepId === stepId);
+  const rail = orch ? railOwning(orch, stepId) : null;
+  if (!orch || !rail || run?.state !== "stalled" || !isLiveConflictHoldStall(run.reason)) return null;
+  const worktrees = get(gitStore)[workspaceId]?.refs?.worktrees ?? null;
+  const { conflicts } = liveConflictsFor(orch, get(gavinTrees)[workspaceId], worktrees);
+  const verdict = liveConflictHold(rail, conflicts, acknowledgedLiveConflicts);
+  if (verdict.hold) acknowledgedLiveConflicts.add(verdict.key);
+  return rail;
+}
+
 export async function retryStep(workspaceId: string, stepId: string): Promise<void> {
+  // A held step's Retry is "Confirm and start": acknowledge the conflict,
+  // then resume the rail its stall paused, so the launch happens now
+  // rather than at the next press of Play.
+  const held = confirmLiveConflictHold(workspaceId, stepId);
+  if (held) {
+    await resumeRail(workspaceId, held.id);
+    return;
+  }
   // `0` for the same reason resetRail passes it: a Retry is a fresh
   // attempt, and an `until` step's loop budget is the one count no
   // launch clears.
@@ -1440,7 +1494,19 @@ async function executeToolLaunch(
     return false;
   }
 
-  const body = resolveToolBody(tool, stepParams(step));
+  // Commit changes, in a checkout other agents are live in, commits only
+  // what this rail's own cards wrote and stages it path by path -- the
+  // way Consolidate repo always has -- rather than every file it finds,
+  // half-written ones included (git/sharedCommit.ts).
+  const body =
+    tool.kind === "agent" && tool.id === "builtin:commit"
+      ? await commitBodyForCheckout(
+          workspaceId,
+          cwd,
+          resolveToolBody(tool, stepParams(step)),
+          rail.stages.flatMap((s) => s.steps).filter((t) => !t.toolId).map((t) => t.cardPath)
+        )
+      : resolveToolBody(tool, stepParams(step));
   let agent = resolvedAgentFor(workspaceId, cwd);
   if (tool.kind === "agent") {
     // A rail step is unattended: Cursor's MCP dialog would stall with
@@ -2320,7 +2386,8 @@ async function runTick(workspaceId: string): Promise<boolean> {
       Math.floor(Date.now() / 1000),
       get(layoutState).sessionsSeenWorking ?? new Set(),
       critiqueSessionsMap(get(criticalReviewRuns)[workspaceId]),
-      verdictsOf(get(turnVerdictById))
+      verdictsOf(get(turnVerdictById)),
+      liveConflictsFor(orch, tree, worktrees)
     )
   );
 }
@@ -2710,6 +2777,22 @@ export function setRailAutoResumeAction(
   autoResume: boolean
 ): Promise<string | null> {
   return mutatePlan(workspaceId, (o) => setRailAutoResume(o, railId, autoResume));
+}
+
+/// Turn this rail's live-conflict hold on or off (lc-06). Part of the
+/// plan, like auto-resume. The toggle is dark against a daemon that
+/// would drop the field (`FEATURE_MIN_VERSION.liveConflictHold`).
+export function setRailHoldOnLiveConflictAction(
+  workspaceId: string,
+  railId: string,
+  hold: boolean
+): Promise<string | null> {
+  return mutatePlan(workspaceId, (o) => setRailHoldOnLiveConflict(o, railId, hold));
+}
+
+/// @internal - for testing only
+export function __acknowledgedLiveConflictsForTesting(): Set<string> {
+  return acknowledgedLiveConflicts;
 }
 
 /// Set or clear this rail's start condition, then LOOK: a trigger whose

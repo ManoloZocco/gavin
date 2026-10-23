@@ -19,7 +19,9 @@
     cardSessionState,
     type CardSessionState,
   } from "$lib/board/columnRunAction";
-  import { Play, RotateCcw, Archive } from "@lucide/svelte";
+  import { Play, RotateCcw, Archive, TriangleAlert } from "@lucide/svelte";
+  import { cardWarningText } from "$lib/board/cardLint";
+  import { cardLint } from "$lib/board/cardLintState";
   import IconButton from "$lib/ui/IconButton.svelte";
   import { X } from "@lucide/svelte";
   import { formatShortcut } from "$lib/core/shortcuts";
@@ -32,6 +34,8 @@
   import { executeArchive, isDoneColumn } from "$lib/files/archiveActions";
   import { featureBlockedReason } from "$lib/core/daemonCompat";
   import { daemonCompat } from "$lib/core/layoutState";
+  import { gavinTrees } from "$lib/core/gavinState";
+  import { checkoutShare } from "$lib/cards/sharedCheckout";
 
   interface Props {
     workspaceId: string;
@@ -48,6 +52,10 @@
     // that says work on this card already happened. Absent, that column
     // falls back to a plain run.
     onResumeCard?: ((card: CardView) => void | Promise<void>) | null;
+    // "Each in its own worktree" (sharedCheckout.ts): the confirm's
+    // second action when its press would share a checkout. Absent, the
+    // confirm still SAYS the checkout is shared and offers only the one.
+    onRunInOwnWorktrees?: ((cards: CardView[]) => void | Promise<void>) | null;
     onSendToAgent?: ((card: CardView) => void) | null;
     agentAvailable?: boolean;
     onDeleteCard?: ((card: CardView) => void) | null;
@@ -74,6 +82,7 @@
     onOpenPlanCard,
     onRunCard = null,
     onResumeCard = null,
+    onRunInOwnWorktrees = null,
     onSendToAgent = null,
     agentAvailable = false,
     onDeleteCard = null,
@@ -133,6 +142,10 @@
   // permanent), but freely reorderable like any other column. Their X
   // CLEARS instead -- the column stays, its cards go.
   const permanent = $derived(isPermanentColumn(column.name));
+  // The card linter's board-scoped findings for this column: today only
+  // a column right of Done, which splits the rails' done from the
+  // daemon's.
+  const columnWarning = $derived(cardWarningText($cardLint[workspaceId]?.byColumn.get(column.id) ?? [], false));
 
   let columnPrompt = $state<"delete" | "clear" | null>(null);
   let deleteError = $state<string | null>(null);
@@ -240,6 +253,18 @@
   );
   let runningAll = $state(false);
 
+  // Who already works in the checkout this column's cards launch into:
+  // every board launch runs in the workspace root, so that is the
+  // checkout asked about.
+  const share = $derived(
+    checkoutShare(
+      $gavinTrees[workspaceId]?.rootMissing ? null : $gavinTrees[workspaceId]?.rootPath,
+      $kanbanState[workspaceId]?.cardSessions ?? [],
+      (b) => cardSessionState($layoutState, b) === "live",
+      (path) => allCards.find((c) => c.id === path)?.title
+    )
+  );
+
   // Asks first: a whole column's worth of agent spawns is not something
   // a click should fire outright. Held as a bare flag rather than a
   // captured target list, the same reason the Orchestration tab's own
@@ -259,9 +284,23 @@
       runAction,
       column.name,
       runnable,
-      estimateFor(workspaceId, runnable.length)
+      estimateFor(workspaceId, runnable.length),
+      share
     );
   });
+
+  // The confirm's second action: the same targets, each launched in a
+  // worktree of its own. Never offered for Resume (columnRunAllConfirm).
+  async function runAllInOwnWorktrees(): Promise<void> {
+    runAllPrompt = false;
+    if (runningAll || !onRunInOwnWorktrees) return;
+    runningAll = true;
+    try {
+      await onRunInOwnWorktrees([...runnable]);
+    } finally {
+      runningAll = false;
+    }
+  }
 
   async function runAll(): Promise<void> {
     const action = runAction;
@@ -373,6 +412,9 @@
       <button type="button" class="name" onclick={startRename} use:tooltip={"Rename column — its name is the status vocabulary"}>{column.name}</button>
       <span class="count" class:filtered use:tooltip={countTip}>{countText}</span>
     {/if}
+    {#if columnWarning}
+      <span class="column-warning" use:tooltip={columnWarning}><TriangleAlert size={12} /></span>
+    {/if}
     {#if runAction && runnable.length > 0}
       <!-- The reason rides the wrapper, not the button: IconButton binds
            its tooltip to the <button>, and a disabled element never
@@ -462,7 +504,12 @@
   <ConfirmPrompt
     title={runAllContent.title}
     lines={runAllContent.lines}
-    choices={[{ label: runAllContent.confirmLabel, onPick: () => void runAll() }]}
+    choices={[
+      { label: runAllContent.confirmLabel, onPick: () => void runAll() },
+      ...(runAllContent.worktreeLabel && onRunInOwnWorktrees
+        ? [{ label: runAllContent.worktreeLabel, onPick: () => void runAllInOwnWorktrees() }]
+        : []),
+    ]}
     onCancel={() => (runAllPrompt = false)}
   />
 {/if}
@@ -588,6 +635,12 @@
   }
   .count.filtered {
     color: var(--accent-text);
+  }
+  .column-warning {
+    display: inline-flex;
+    align-items: center;
+    flex: 0 0 auto;
+    color: var(--warning-text);
   }
   .no-match {
     color: var(--text-subtle);

@@ -59,6 +59,9 @@ export interface CardView {
   contextFolder: string;
   fileName: string;
   parseWarning: boolean;
+  /// The daemon's per-field reasons behind `parseWarning`; empty when it
+  /// gave none (a clean card, or an older daemon).
+  parseWarnings?: string[];
   // Plan cards only: children (parent → this file, no status) in order.
   nestedChildren: CardView[];
 }
@@ -139,6 +142,7 @@ function cardView(ctx: GavinContext, plan: PlanFileInfo): CardView {
     contextFolder: ctx.folderPath,
     fileName: plan.fileName,
     parseWarning: plan.parseWarning,
+    parseWarnings: plan.parseWarnings ?? [],
     nestedChildren: [],
   };
 }

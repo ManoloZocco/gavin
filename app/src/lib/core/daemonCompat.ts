@@ -756,6 +756,41 @@ export const FEATURE_MIN_VERSION = {
   // Its ssh twin: the same read against an ssh workspace's HOST daemon
   // (`sshActivityBlocked` in sshWorkspace.ts), never the local one's.
   sshActivityCalendar: 78,
+  // Workspace insights (v79): the app publishes what it works out about
+  // each workspace -- effective agent config, card lint, worktree setup
+  // proposal, setup steps left -- for gavin-mcp's
+  // `gavin_get_effective_config` and `gavin_doctor` to read. Two new
+  // request TYPES, so `min_version_for` already keeps them off an older
+  // daemon's wire; this entry is what keeps the publisher from asking at
+  // all, rather than taking a version error on every workspace change.
+  //
+  // Consumer: `workspaceInsightsState.ts`'s publisher, which skips a
+  // workspace whose daemon is older. Nothing on screen depends on it.
+  workspaceInsights: 79,
+  // Its ssh twin: an ssh workspace's agents ask its HOST's daemon, so
+  // that is the version that counts (`sshInsightsBlocked`).
+  sshWorkspaceInsights: 79,
+  // The `[worktree] setup` writer (v80,
+  // `lc-08-propose-worktree-setup-from-lockfiles.md`).
+  // `Request::SetWorktreeSetup` is a new request TYPE, so `min_version_for`
+  // already refuses it against an older daemon and nothing lands half
+  // written; this entry is for what the editor SAYS. Its consumer is the
+  // Worktree setup editor in the workspace Settings (`WorktreeSetupPanel`,
+  // through `worktreeSetupEditor.ts`): Save and "Use proposal" grey out
+  // with this reason, and the panel keeps showing the declared lines and
+  // the copyable proposal it showed before there was a writer.
+  worktreeSetupEditor: 80,
+  // The per-rail live-conflict hold (v81, lc-06). It widens an EXISTING
+  // request -- `SetOrchestration` with a rail's `holdOnLiveConflict` --
+  // so `min_version_for` (which gates request TYPES) is structurally
+  // blind to it, and this entry is the only gate there is. An older
+  // daemon parses the plan and drops the field: the human turns the hold
+  // on, the next read brings the rail back without it, and the rail
+  // never holds -- an opt-in that silently does not stick.
+  //
+  // Consumer: the rail header's hold toggle (OrchestrationRail.svelte via
+  // OrchestrationHubView), dark with this reason.
+  liveConflictHold: 81,
 } as const;
 
 export type Feature = keyof typeof FEATURE_MIN_VERSION;

@@ -117,6 +117,54 @@ pub const RUN_GIT_CAPPED_MIN_VERSION: u32 = 58;
 /// probe at all -- into actionable "restart the daemon" errors instead of
 /// mysteries (see the 2026-08-07 stale-daemon incident).
 ///
+/// v79 is workspace insights (`learning-curve.md`, report §2/§7): the
+/// app publishes what it works out about a workspace -- the effective
+/// agent config, the card linter's findings with their safe fixes, the
+/// worktree setup proposal, the setup steps left -- with
+/// `PublishWorkspaceInsights`, and gavin-mcp reads it back with
+/// `GetWorkspaceInsights` (`gavin_get_effective_config`, `gavin_doctor`),
+/// so an agent can diagnose a workspace from the same answer the human
+/// sees. The daemon keeps only the latest per root, in memory. Two new
+/// request TYPES and one new reply, no widened payload, so
+/// `min_version_for` is their whole wire gate and `MIN_COMPATIBLE_VERSION`
+/// stands; the app's publisher owes `FEATURE_MIN_VERSION.workspaceInsights`
+/// (and its ssh-host twin) so it never sends to an older daemon.
+/// v80 is the `[worktree] setup` writer
+/// (`lc-08-propose-worktree-setup-from-lockfiles.md`):
+/// `SetWorktreeSetup`, the install lines a new worktree runs before its
+/// agent starts, written into `.gavin-root/config.toml` by the Settings
+/// editor and -- with `only_if_absent`, never over a declared value -- by
+/// `gavin_propose_worktree_setup`. Whatever lands stays inert until the
+/// human approves it through the app's trust hash, which is what lets an
+/// agent reach this write at all. One new request TYPE (and its
+/// `WorktreeSetupWritten` reply) and no widened payload, so
+/// `min_version_for` is its whole wire gate and `MIN_COMPATIBLE_VERSION`
+/// stands; the app owes `FEATURE_MIN_VERSION.worktreeSetupEditor` for the
+/// line the editor shows instead of a Save an older daemon would refuse.
+/// v81 is two pieces of the learning-curve work. The first tells the app
+/// that an agent session never got its `gavin_*` tools
+/// (`lc-01-flag-agent-sessions-without-gavin-tools.md`): a session
+/// launched with a stock agent profile whose gavin-mcp has not presented
+/// its token within `TOOLS_MISSING_GRACE` is marked, and the mark is
+/// cleared if a Hello arrives later. It travels as
+/// `SessionSummary.tools_missing` for the baseline and the
+/// `SessionToolsMissing` push for the change, sent only to an app whose
+/// `Hello` speaks `TOOLS_MISSING_MIN_VERSION` -- an older app has no arm
+/// for it, and `Response` has no catch-all. Neither is a request, so
+/// `min_version_for` is untouched; an older daemon simply never marks a
+/// session, which reads as no mark at all.
+///
+/// The second is the per-rail opt-in to hold the next stage while a live
+/// same-worktree conflict involves the rail
+/// (`lc-06-guard-parallel-runs-in-one-checkout.md`), the one exception to
+/// rule O4: `Rail.hold_on_live_conflict`, `serde(default)` and absent on
+/// every rail written before it, which reads as off. It widens an
+/// EXISTING request (`SetOrchestration`), which `min_version_for` gates
+/// by TYPE and therefore cannot see -- a v80 daemon parses the plan and
+/// drops the field, so the opt-in would silently never stick. The gate
+/// that matters is the app's `FEATURE_MIN_VERSION.liveConflictHold`.
+/// `MIN_COMPATIBLE_VERSION` stands.
+///
 /// v78 is the activity calendar (`tbd-feat-activity-calendar.md`):
 /// `ActivityRuns`, every card run and standalone tool run of a workspace
 /// that started inside a time window, read off the `card_runs` and
@@ -1024,7 +1072,19 @@ pub const RUN_GIT_CAPPED_MIN_VERSION: u32 = 58;
 /// is untouched -- the gate that matters is the app's
 /// FEATURE_MIN_VERSION.groups, because a v14 daemon parses the request
 /// fine and then drops both fields on the floor.
-pub const PROTOCOL_VERSION: u32 = 78;
+pub const PROTOCOL_VERSION: u32 = 81;
+
+/// The most a `PublishWorkspaceInsights` payload may weigh, serialized
+/// (v79). Half of [`MAX_LINE_BYTES`], so the request line it rides on
+/// always fits with room for the envelope; the app keeps its own
+/// snapshot well under it by capping the lists it carries, and the
+/// daemon refuses anything heavier rather than holding it.
+pub const MAX_WORKSPACE_INSIGHTS_BYTES: usize = 512 * 1024;
+
+/// The first version that marks an agent session whose gavin-mcp never
+/// said hello and pushes `SessionToolsMissing` (v81). The daemon compares
+/// the app's `Hello` version with this before it writes the push.
+pub const TOOLS_MISSING_MIN_VERSION: u32 = 81;
 
 /// The first version that has Scheduled tasks and pushes
 /// `ScheduledTasksChanged` (v77). The daemon compares the watching app's
@@ -1442,6 +1502,27 @@ pub enum Request {
         root_path: String,
         key: String,
         value: String,
+    },
+    /// Writes `[worktree] setup` in `<root_path>/.gavin-root/config.toml`
+    /// (v80): the shell lines a new worktree runs, `&&`-joined, before its
+    /// agent starts. Its own request rather than another
+    /// `SetRootConfigField` key because the value is a LIST, and a list
+    /// squeezed through a one-line string would need a delimiter a line
+    /// could carry. Each line is trimmed; a blank one, one with a line
+    /// break, too many lines or too long a line is refused. An empty
+    /// `lines` removes the key.
+    ///
+    /// `only_if_absent` makes it a proposal: when the file already has a
+    /// `setup` key -- even an empty one, which is a human saying "nothing"
+    /// -- nothing is written and the reply says so with the lines already
+    /// declared. That is the only form an `agent` connection may send.
+    /// Either way the lines stay inert until the human approves them in
+    /// the app (the workspace trust hash); this request never runs one.
+    SetWorktreeSetup {
+        root_path: String,
+        lines: Vec<String>,
+        #[serde(default)]
+        only_if_absent: bool,
     },
     /// Stateless scan -- no watch required (gavin-mcp's gavin_get_tree).
     ScanGavinRoot {
@@ -1867,6 +1948,26 @@ pub enum Request {
     /// run, a CLI with no hook -- which is not an error.
     ShellWrites {
         conversation_id: String,
+    },
+    /// What the app works out about a workspace (v79): the effective agent
+    /// config, the card linter's findings and safe fixes, the worktree
+    /// setup proposal and the setup steps left. The app computes all of it
+    /// in TypeScript, and an agent can reach only the daemon, so the app
+    /// hands the daemon its latest answer for the agent to read back with
+    /// `GetWorkspaceInsights`. `insights` is opaque here -- its shape is
+    /// the app's `workspaceInsights.ts` and gavin-mcp's reader -- and is
+    /// refused above [`MAX_WORKSPACE_INSIGHTS_BYTES`] serialized.
+    /// `root_path` is a watched workspace root. The app's alone.
+    PublishWorkspaceInsights {
+        root_path: String,
+        insights: serde_json::Value,
+    },
+    /// The last `PublishWorkspaceInsights` for this root (v79), answered
+    /// with `WorkspaceInsights`. Never an error for a root nothing was
+    /// published for: both fields `None`, which says "the app has not
+    /// told this daemon anything about it".
+    GetWorkspaceInsights {
+        root_path: String,
     },
     /// A workspace's Scheduled tasks (v77, ADR 0010): every copy under
     /// `.gavin-root/scheduled/`, each with its run state. `root_path` is
@@ -2739,6 +2840,20 @@ pub fn min_version_for(req: &Request) -> u32 {
         // daemon is too old rather than drawing a year with no runs in it.
         Request::ActivityRuns { .. } => 78,
 
+        // Workspace insights (v79): the app hands the daemon what it
+        // works out about a workspace, and gavin-mcp reads it back. Two
+        // new request TYPES, so this match is their whole wire gate; the
+        // app mirrors it as FEATURE_MIN_VERSION.workspaceInsights so its
+        // publisher never asks an older daemon, and gavin-mcp's two tools
+        // answer an older daemon with the version they need.
+        Request::PublishWorkspaceInsights { .. } | Request::GetWorkspaceInsights { .. } => 79,
+        // The `[worktree] setup` writer (v80). A new request TYPE, so this
+        // match is its whole wire gate; the app mirrors it as
+        // FEATURE_MIN_VERSION.worktreeSetupEditor so the Settings editor
+        // says the daemon is too old instead of offering a Save that an
+        // older daemon would answer with an unknown-request error.
+        Request::SetWorktreeSetup { .. } => 80,
+
         // One binding, command included (v43), now the board read leaves
         // the command out. A new request TYPE, so this is the whole wire
         // gate -- and no app surface is greyed behind it: the app host
@@ -3563,6 +3678,11 @@ pub enum Response {
     CardSession { card_session: Option<CardSession> },
     CardRuns { runs: Vec<CardRun> },
     ActivityRuns { runs: Vec<ActivityRun> },
+    /// The answer to `SetWorktreeSetup` (v80). `written` is false when
+    /// `only_if_absent` found a `setup` key already there (or the write
+    /// would have changed nothing); `lines` is what the file declares
+    /// AFTER the request, so a refused proposal shows the human's value.
+    WorktreeSetupWritten { written: bool, lines: Vec<String> },
     /// The answer to `ShellWrites` (v72).
     ShellWrites { writes: shell_writes::ShellWrites },
     /// The answer to `ListScheduledTasks` (v77).
@@ -3578,11 +3698,28 @@ pub enum Response {
         #[serde(default)]
         raw: Option<String>,
     },
+    /// The answer to `GetWorkspaceInsights` (v79): what the app last
+    /// published for the root, and when the daemon received it (unix
+    /// seconds). Both `None` when nothing was published.
+    WorkspaceInsights {
+        #[serde(default)]
+        insights: Option<serde_json::Value>,
+        #[serde(default)]
+        published_at: Option<i64>,
+    },
     /// Push to the connection watching a workspace (v77), when that app
     /// speaks `SCHEDULED_TASKS_MIN_VERSION`: something under its
     /// `.gavin-root/scheduled/` changed -- a copy edited, a report
     /// written. Read the list again.
     ScheduledTasksChanged { workspace_id: String },
+    /// Push (v81): whether this agent session is running without its
+    /// `gavin_*` tools -- launched with a stock agent profile, and no
+    /// Hello from its gavin-mcp within the daemon's grace period.
+    /// `missing: false` follows when a Hello arrives after all. Sent only
+    /// to an `app` connection that reads pushes and whose `Hello` speaks
+    /// `TOOLS_MISSING_MIN_VERSION`; `SessionSummary.tools_missing` is its
+    /// baseline.
+    SessionToolsMissing { id: String, missing: bool },
     ToolRuns { runs: Vec<ToolRun> },
     DirtyPaths { paths: Vec<String>, truncated: bool },
     Orchestration {
@@ -4576,6 +4713,18 @@ pub struct SessionSummary {
     /// app reload, never a daemon restart, which interrupts it anyway.
     #[serde(default)]
     pub headroom_reach: Option<String>,
+    /// This agent session has run past the daemon's grace period without
+    /// its gavin-mcp presenting the session token (v81): the agent is
+    /// working without any `gavin_*` tool. Only ever true for a session
+    /// launched with a stock agent profile, never for a shell, a command
+    /// tool or a custom agent gavin wrote no MCP entry for. Kept by the
+    /// daemon in memory, like `headroom_reach`: the window is measured
+    /// from a spawn only this lifetime performed.
+    ///
+    /// `serde(default)` because an older daemon does not send it, and
+    /// false is the only reading available there: it never looked.
+    #[serde(default)]
+    pub tools_missing: bool,
 }
 
 /// A surviving process, as much of it as the app needs to talk about it.
@@ -4944,6 +5093,14 @@ pub struct Rail {
     /// nobody wrote down is a decision gavin took for the human.
     #[serde(default)]
     pub trigger: Option<RailTrigger>,
+    /// Whether this rail's next stage waits while a LIVE same-worktree
+    /// conflict with another rail's running agents involves it, until the
+    /// human confirms (v81, lc-06). The one opt-in exception to rule O4,
+    /// which says a conflict never blocks a run: None and false both mean
+    /// no, which is O4 and the behaviour that predates the field. The
+    /// daemon only stores it; the app's scheduler decides what it means.
+    #[serde(default)]
+    pub hold_on_live_conflict: Option<bool>,
     pub page_id: Option<String>,
     pub stages: Vec<Stage>,
 }
@@ -5411,6 +5568,14 @@ pub struct PlanFileInfo {
     pub checklist_done: u32,
     pub checklist_total: u32,
     pub parse_warning: bool,
+    /// What `parse_warning` stands for: one line per field gavin could
+    /// not read as written, each led by the field's name ("priority:
+    /// `hgih` is not ..."). The flag alone told the board "some fields may
+    /// be unreadable" and an agent nothing at all. `serde(default)` so an
+    /// older daemon's tree still parses; empty is not serialized, so a
+    /// clean card costs nothing on the wire.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parse_warnings: Vec<String>,
     /// The card file's mtime, as whole seconds since the unix epoch, or
     /// None when the file could not be stat'd. The archive grid is
     /// ordered by it -- for an archived card it is effectively "when it
@@ -7570,6 +7735,7 @@ mod tests {
             compressed: false,
             uncompressed_reason: Some("not-ready".into()),
             headroom_reach: None,
+            tools_missing: false,
         };
 
         let written = serde_json::to_string(&summary).unwrap();
@@ -7592,6 +7758,30 @@ mod tests {
         let written = serde_json::to_string(&summary).unwrap();
         assert!(written.contains(r#""headroom_reach":"unreached""#), "{written}");
         assert_eq!(serde_json::from_str::<SessionSummary>(&written).unwrap(), summary);
+    }
+
+    /// v81's half: an agent session that never got its gavin tools. An
+    /// older daemon sends nothing, and that has to read as no mark -- it
+    /// never looked, and a mark it did not draw must not appear.
+    #[test]
+    fn a_session_summary_carries_tools_missing_and_an_older_one_reads_as_unmarked() {
+        let older = r#"{"id":"s1","workspace_path":"/ws","cwd":"/ws","status":"idle","restored":false}"#;
+        let read: SessionSummary = serde_json::from_str(older).unwrap();
+        assert!(!read.tools_missing);
+
+        let summary = SessionSummary { tools_missing: true, ..read };
+        let written = serde_json::to_string(&summary).unwrap();
+        assert!(written.contains(r#""tools_missing":true"#), "{written}");
+        assert_eq!(serde_json::from_str::<SessionSummary>(&written).unwrap(), summary);
+    }
+
+    #[test]
+    fn the_tools_missing_push_names_the_session_and_the_verdict() {
+        assert_eq!(
+            serde_json::to_value(Response::SessionToolsMissing { id: "s1".into(), missing: true }).unwrap(),
+            serde_json::json!({ "type": "SessionToolsMissing", "id": "s1", "missing": true })
+        );
+        assert!(TOOLS_MISSING_MIN_VERSION <= PROTOCOL_VERSION);
     }
 
     /// The override is v50's widened payload: invisible to
@@ -8047,6 +8237,7 @@ mod tests {
                     checklist_done: 0,
                     checklist_total: 0,
                     parse_warning: false,
+                    parse_warnings: Vec::new(),
                     modified_at: None,
                     attachments: vec!["docs/spec.md".to_string()],
                     complexity: Some(Complexity::Moderate),
@@ -8298,6 +8489,43 @@ mod tests {
                 assert_eq!(root_path, "/ws");
                 assert_eq!(key, "profile");
                 assert_eq!(value, "codex");
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    /// `only_if_absent` is `serde(default)`, so a writer that leaves it
+    /// out gets the plain write it would expect -- and the reply carries
+    /// the lines as the file holds them afterwards.
+    #[test]
+    fn set_worktree_setup_roundtrips_and_defaults_to_a_plain_write() {
+        let mut buf = Vec::new();
+        let req = Request::SetWorktreeSetup {
+            root_path: "/ws".into(),
+            lines: vec!["npm ci".into(), "(cd app && npm ci)".into()],
+            only_if_absent: true,
+        };
+        write_message(&mut buf, &req).unwrap();
+        let decoded: Request = read_message(&mut Cursor::new(buf)).unwrap().unwrap();
+        match decoded {
+            Request::SetWorktreeSetup { root_path, lines, only_if_absent } => {
+                assert_eq!(root_path, "/ws");
+                assert_eq!(lines, vec!["npm ci", "(cd app && npm ci)"]);
+                assert!(only_if_absent);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+        let bare: Request =
+            serde_json::from_str(r#"{"type":"SetWorktreeSetup","root_path":"/ws","lines":[]}"#).unwrap();
+        assert!(matches!(bare, Request::SetWorktreeSetup { only_if_absent: false, .. }), "{bare:?}");
+
+        let mut buf = Vec::new();
+        let reply = Response::WorktreeSetupWritten { written: false, lines: vec!["make".into()] };
+        write_message(&mut buf, &reply).unwrap();
+        match read_message::<_, Response>(&mut Cursor::new(buf)).unwrap().unwrap() {
+            Response::WorktreeSetupWritten { written, lines } => {
+                assert!(!written);
+                assert_eq!(lines, vec!["make"]);
             }
             other => panic!("wrong variant: {other:?}"),
         }
@@ -8596,7 +8824,18 @@ mod tests {
         // v78: Request::ActivityRuns + Response::ActivityRuns -- a
         // workspace's card and tool runs inside a time window, for the
         // activity calendar. One new TYPE.
-        assert_eq!(PROTOCOL_VERSION, 78);
+        // v79: PublishWorkspaceInsights + GetWorkspaceInsights and the
+        // WorkspaceInsights reply -- what the app works out about a
+        // workspace, kept by the daemon for gavin-mcp. Two new TYPES.
+        // v80: Request::SetWorktreeSetup + Response::WorktreeSetupWritten
+        // -- the `[worktree] setup` writer the Settings editor and
+        // gavin_propose_worktree_setup share. One new TYPE.
+        // v81: the SessionToolsMissing push and SessionSummary.tools_missing
+        // -- an agent session that never got its gavin_* tools -- and
+        // Rail.hold_on_live_conflict. No new request TYPE, so this match
+        // is blind to both; daemonCompat.ts's `liveConflictHold` gates the
+        // widened rail.
+        assert_eq!(PROTOCOL_VERSION, 81);
     }
 
     #[test]
@@ -9016,6 +9255,11 @@ mod tests {
             Request::GetCardSession { workspace_id: "w".into(), path: "p".into() },
             Request::CardRuns { workspace_id: "w".into(), path: "p".into() },
             Request::ActivityRuns { workspace_id: "w".into(), since: 0, until: 1 },
+            // v79: workspace insights.
+            Request::PublishWorkspaceInsights { root_path: "/r".into(), insights: serde_json::json!({}) },
+            Request::GetWorkspaceInsights { root_path: "/r".into() },
+            // v80: the `[worktree] setup` writer.
+            Request::SetWorktreeSetup { root_path: "/r".into(), lines: vec!["npm ci".into()], only_if_absent: true },
             // v72: what a shell call wrote.
             Request::RecordShellWrites {
                 conversation_id: "c".into(),
@@ -9379,6 +9623,11 @@ mod tests {
         expected.insert(77, 8);
         // ActivityRuns -- a workspace's runs inside a time window.
         expected.insert(78, 1);
+        // PublishWorkspaceInsights, GetWorkspaceInsights -- what the app
+        // works out about a workspace, for gavin-mcp to read.
+        expected.insert(79, 2);
+        // SetWorktreeSetup -- the `[worktree] setup` writer.
+        expected.insert(80, 1);
         expected.insert(u32::MAX, 1); // Request::Unknown
 
         assert_eq!(
@@ -9489,6 +9738,48 @@ mod tests {
             Response::ActivityRuns { runs } => assert_eq!(runs, vec![run, tool]),
             other => panic!("expected ActivityRuns, got {other:?}"),
         }
+    }
+
+    /// The insights travel opaque: whatever JSON the app published comes
+    /// back byte-for-byte equal, and the reply's two fields are optional
+    /// on the wire so "nothing published" is a reply, not a parse error.
+    #[test]
+    fn workspace_insights_round_trip_opaque_json() {
+        let insights = serde_json::json!({
+            "version": 1,
+            "lint": { "findings": [{ "code": "status-spelling", "path": "/r/a.md" }], "safeFixes": [] },
+            "setup": null,
+        });
+        let mut buf = Vec::new();
+        write_message(&mut buf, &Request::PublishWorkspaceInsights {
+            root_path: "/r".into(),
+            insights: insights.clone(),
+        })
+        .unwrap();
+        write_message(&mut buf, &Response::WorkspaceInsights {
+            insights: Some(insights.clone()),
+            published_at: Some(1_790_000_000),
+        })
+        .unwrap();
+        let mut reader = &buf[..];
+        match read_message::<_, Request>(&mut reader).unwrap().unwrap() {
+            Request::PublishWorkspaceInsights { root_path, insights: got } => {
+                assert_eq!(root_path, "/r");
+                assert_eq!(got, insights);
+            }
+            other => panic!("expected PublishWorkspaceInsights, got {other:?}"),
+        }
+        match read_message::<_, Response>(&mut reader).unwrap().unwrap() {
+            Response::WorkspaceInsights { insights: got, published_at } => {
+                assert_eq!(got, Some(insights));
+                assert_eq!(published_at, Some(1_790_000_000));
+            }
+            other => panic!("expected WorkspaceInsights, got {other:?}"),
+        }
+        let empty: Response = serde_json::from_str(r#"{"type":"WorkspaceInsights"}"#).unwrap();
+        assert!(matches!(empty, Response::WorkspaceInsights { insights: None, published_at: None }));
+        // The cap leaves room in a line for the envelope around it.
+        assert!((MAX_WORKSPACE_INSIGHTS_BYTES as u64) < MAX_LINE_BYTES);
     }
 
     /// A tool run crosses to the frontend the way a card run does, and
@@ -9931,6 +10222,7 @@ mod tests {
                 rail: Some("frontend".into()),
                 at: None,
             }),
+            hold_on_live_conflict: Some(true),
             page_id: None,
             stages: vec![Stage {
                 id: "s1".into(),
@@ -9956,6 +10248,7 @@ mod tests {
                 "branch": "feature/api",
                 "autoResume": true,
                 "trigger": { "kind": "rail-done", "rail": "frontend" },
+                "holdOnLiveConflict": true,
                 "pageId": null,
                 "stages": [{ "id": "s1", "position": 0, "mode": "parallel", "name": null,
                              "steps": [{ "id": "t1", "position": 0, "cardPath": "/x/a.md",
@@ -9997,6 +10290,9 @@ mod tests {
         // a human (or another rail's step) arms, which is what every rail
         // written before v35 is.
         assert_eq!(rail.trigger, None);
+        // ...nor into holding on a live conflict (v81). Absent is rule
+        // O4: a conflict never blocks a run.
+        assert_eq!(rail.hold_on_live_conflict, None);
     }
 
     /// A `rail-done` trigger names its rail; `all-rails-done` names

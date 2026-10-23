@@ -276,6 +276,33 @@ export interface CardIntent extends IntentBase {
   /// go around it (`relaunchesWithoutHeadroom`). Absent on every other
   /// launch, and on every intent queued by a build that predates it.
   withoutHeadroom?: true;
+  /// A board Run the human sent to a worktree of its own ("Each in its
+  /// own worktree", sharedCheckout.ts). Carried across the wait because
+  /// the confirm named this branch and this folder: a launch that came
+  /// back from the queue in the shared checkout would be the very thing
+  /// the human pressed the second button to avoid. Absent on every other
+  /// launch, and on every intent queued by a build that predates it.
+  worktree?: CardWorktreeLaunch;
+}
+
+/// Where a board Run forks its own checkout: the folder, the new branch,
+/// and the commit it forks from (`forkBase`, null for git's default).
+export interface CardWorktreeLaunch {
+  path: string;
+  branch: string;
+  from: string | null;
+}
+
+export function isCardWorktreeLaunch(value: unknown): value is CardWorktreeLaunch {
+  if (!value || typeof value !== "object") return false;
+  const w = value as Partial<CardWorktreeLaunch>;
+  return (
+    typeof w.path === "string" &&
+    w.path !== "" &&
+    typeof w.branch === "string" &&
+    w.branch !== "" &&
+    (w.from === null || typeof w.from === "string")
+  );
 }
 
 export interface ToolIntent extends IntentBase {
@@ -483,6 +510,11 @@ export function parseLaunchQueue(raw: string | null): LaunchIntent[] {
     if (!i.kind || !kinds.includes(i.kind)) return false;
     if (i.kind === "card") {
       const c = entry as CardIntent;
+      // A worktree that does not read as one drops the whole entry rather
+      // than launching without it: run in the shared checkout, it would
+      // be the launch the human pressed "Each in its own worktree" to
+      // avoid.
+      if (c.worktree !== undefined && !isCardWorktreeLaunch(c.worktree)) return false;
       return typeof c.cardPath === "string" && !!c.cardPath && typeof c.mode === "string";
     }
     if (i.kind === "tool") return typeof (entry as ToolIntent).toolId === "string";
