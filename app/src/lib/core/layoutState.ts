@@ -1543,6 +1543,13 @@ export async function bootstrap(): Promise<void> {
   );
   unlisteners.push(await initCompression());
   unlisteners.push(whileHoldingAppDuties(startCompressionSwitch));
+  // What the app works out about each workspace -- effective agent config,
+  // card lint, worktree setup proposal, setup steps left -- published to
+  // the daemon for gavin-mcp's doctor (v79). One teller, from the window
+  // holding the duties, like the switch above. Dynamically imported for
+  // the cycle reason above (it reads this module's stores).
+  const { startWorkspaceInsights } = await import("$lib/workspace/workspaceInsightsState");
+  unlisteners.push(whileHoldingAppDuties(startWorkspaceInsights));
   // The adopted-memory index: a workspace opened with memories the index
   // does not match is brought up without anyone opening the wizard. One
   // window, so two do not race the same model download. Dynamically

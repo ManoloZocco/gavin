@@ -7430,6 +7430,61 @@ pub async fn activity_runs(
         .map_err(|e| e.to_string())
 }
 
+async fn publish_workspace_insights_impl(
+    lanes: &DaemonLanes,
+    root_path: String,
+    insights: serde_json::Value,
+) -> anyhow::Result<()> {
+    // Weighed here as well as in the daemon, so an oversized snapshot is
+    // refused before it costs a megabyte on an ssh link.
+    let weight = serde_json::to_vec(&insights).map(|b| b.len()).unwrap_or(usize::MAX);
+    if weight > protocol::MAX_WORKSPACE_INSIGHTS_BYTES {
+        anyhow::bail!(
+            "workspace insights are {weight} bytes; the daemon keeps at most {}",
+            protocol::MAX_WORKSPACE_INSIGHTS_BYTES
+        );
+    }
+    match lanes.request(Request::PublishWorkspaceInsights { root_path, insights }).await? {
+        Response::Ok => Ok(()),
+        Response::Error { message } => anyhow::bail!(message),
+        other => anyhow::bail!("expected Ok, got {other:?}"),
+    }
+}
+
+/// Hands the daemon what the app works out about one workspace (v79) --
+/// the effective agent config, the card linter's findings, the worktree
+/// setup proposal, the setup steps left -- so gavin-mcp's
+/// `gavin_get_effective_config` and `gavin_doctor` can read it back.
+/// Routed by the workspace like `link_card_session`: an ssh workspace's
+/// agents ask its host's daemon. The root is the workspace record's own,
+/// never the caller's word, so a publish lands only on a workspace this
+/// app has. The publisher checks FEATURE_MIN_VERSION.workspaceInsights
+/// (or its ssh twin) first; an older daemon is refused here before
+/// anything is sent.
+#[tauri::command]
+pub async fn publish_workspace_insights(
+    workspace_id: String,
+    insights: serde_json::Value,
+    app_handle: AppHandle,
+    state: State<'_, CommandConnection>,
+    compat: State<'_, DaemonCompatState>,
+    workspaces: State<'_, WorkspacesState>,
+) -> Result<(), String> {
+    let root_path = workspaces
+        .0
+        .lock()
+        .unwrap()
+        .workspaces
+        .iter()
+        .find(|w| w.id == workspace_id)
+        .and_then(|w| w.root_path.clone())
+        .ok_or_else(|| format!("workspace {workspace_id} has no root folder"))?;
+    let route = crate::remote::route_for_workspace(&app_handle, &workspace_id)?;
+    publish_workspace_insights_impl(&lanes_for(route, &state, &compat), root_path, insights)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 async fn shell_writes_impl(
     lanes: &DaemonLanes,
     conversation_id: String,
@@ -9215,6 +9270,40 @@ mod kanban_command_tests {
         let got = block_on(activity_runs_impl(&lanes_over(client), "ws-1".to_string(), 0, 100)).unwrap();
 
         assert_eq!(got, runs);
+    }
+
+    #[test]
+    fn publish_workspace_insights_impl_sends_the_snapshot_and_surfaces_a_refusal() {
+        let (client, _dir) = fake_daemon_replying_with(vec![
+            Response::Ok,
+            Response::Error { message: "not a workspace this daemon has open: /x".into() },
+        ]);
+        let lanes = lanes_over(client);
+        let snapshot = serde_json::json!({ "version": 1 });
+        block_on(publish_workspace_insights_impl(&lanes, "/x".into(), snapshot.clone())).unwrap();
+        let err = block_on(publish_workspace_insights_impl(&lanes, "/x".into(), snapshot)).unwrap_err();
+        assert!(err.to_string().contains("not a workspace"), "{err}");
+    }
+
+    /// Too heavy, or a daemon older than v79: refused on this side, and
+    /// nothing reaches the wire. The fake daemon is given no replies, so a
+    /// request that did go out would hang this test rather than pass it.
+    #[test]
+    fn publish_workspace_insights_impl_refuses_before_sending() {
+        let (client, _dir) = fake_daemon_replying_with(vec![]);
+        let heavy = serde_json::json!({ "blob": "x".repeat(protocol::MAX_WORKSPACE_INSIGHTS_BYTES) });
+        let err = block_on(publish_workspace_insights_impl(&lanes_over(client), "/x".into(), heavy)).unwrap_err();
+        assert!(err.to_string().contains("at most"), "{err}");
+
+        let (client, _dir) = fake_daemon_replying_with(vec![]);
+        let older = DaemonCompat { daemon_version: 78, app_version: protocol::PROTOCOL_VERSION, degraded: true };
+        let err = block_on(publish_workspace_insights_impl(
+            &lanes_at(client, older),
+            "/x".into(),
+            serde_json::json!({ "version": 1 }),
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("79"), "{err}");
     }
 
     #[test]

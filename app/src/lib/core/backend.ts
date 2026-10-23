@@ -1537,6 +1537,16 @@ export function activityRuns(workspaceId: string, since: number, until: number):
   return invoke("activity_runs", { workspaceId, since, until });
 }
 
+/// Hands the daemon what the app works out about one workspace (v79,
+/// `workspace/workspaceInsights.ts` builds it) so gavin-mcp's
+/// `gavin_get_effective_config` and `gavin_doctor` can read it. The host
+/// takes the root from the workspace record and routes an ssh workspace
+/// to its host. Gate on FEATURE_MIN_VERSION.workspaceInsights
+/// (`sshInsightsBlocked` for an ssh workspace) before calling.
+export function publishWorkspaceInsights(workspaceId: string, insights: unknown): Promise<void> {
+  return invoke("publish_workspace_insights", { workspaceId, insights });
+}
+
 /// What one run cost, read out of the agent CLI's own transcript by the
 /// conversation id gavin minted for it. No daemon involved and no gate:
 /// these are files on this machine, and the report names its own reason

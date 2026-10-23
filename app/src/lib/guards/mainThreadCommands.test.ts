@@ -153,6 +153,7 @@ const OFF_MAIN_THREAD: [file: string, command: string, waitsOn: string][] = [
   ["session.rs", "card_session", "a daemon round trip (a whole board, against a daemon before v43)"],
   ["session.rs", "card_runs", "a daemon round trip"],
   ["session.rs", "activity_runs", "a daemon round trip"],
+  ["session.rs", "publish_workspace_insights", "a daemon round trip, on every workspace change"],
   ["session.rs", "get_orchestration", "a daemon round trip"],
   ["session.rs", "set_orchestration", "a daemon round trip that pushes the whole plan first"],
   ["session.rs", "set_rail_run", "a daemon round trip, every scheduler pass"],

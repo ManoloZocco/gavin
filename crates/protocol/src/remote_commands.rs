@@ -151,6 +151,10 @@ const REMOTE_COMMAND_TABLE: &[(&str, RemoteAllowance)] = &[
     ("card_session", RemoteAllowance::Allowed),
     ("card_runs", RemoteAllowance::Allowed),
     ("activity_runs", RemoteAllowance::Allowed),
+    // What the desk works out about a workspace, for its agents to read
+    // (v79). The desk's own snapshot: a Device publishing one would
+    // overwrite the diagnosis with whatever a phone's partial view held.
+    ("publish_workspace_insights", RemoteAllowance::Refused),
     ("shell_writes", RemoteAllowance::Allowed),
     // Scheduled tasks (v77). A Device reads the list and its reports,
     // and edits, pauses, duplicates and deletes them on the desk. It

@@ -13,6 +13,7 @@
   } from "$lib/core/layoutState";
   import { resolveAgentConfig, resolvePrdPath } from "$lib/core/settings";
   import { setupBannerText, setupProgress } from "$lib/workspace/setupWizard";
+  import { reportSetupProgress } from "$lib/workspace/setupProgressState";
   import { UNKNOWN_STATUS, type AgentSkillsMark, type AgentSkillsStatus } from "$lib/agents/agentSkills";
   import { workspaceHeadroomReading } from "$lib/agents/headroomSetup";
   import { ensureHeadroomReading, headroomReading } from "$lib/agents/headroomState";
@@ -175,6 +176,12 @@
       playwrightMark,
     })
   );
+
+  // Kept for the insights publisher, so gavin_doctor can name the steps
+  // left; a pending reading is not reported (setupProgressState.ts).
+  $effect(() => {
+    reportSetupProgress(workspaceId, setup);
+  });
 
   $effect(() => {
     void fetchBoard(workspaceId);

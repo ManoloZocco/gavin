@@ -264,6 +264,9 @@ const CLASSIFICATION: Record<string, [Bucket, string?]> = {
   card_session: ["ordinary"],
   card_runs: ["ordinary"],
   activity_runs: ["ordinary"],
+  // Hands the daemon the app's own snapshot of a workspace for gavin-mcp
+  // to read. Replaces the last one; removes nothing.
+  publish_workspace_insights: ["ordinary"],
   // A read: what the shell-write hook recorded of one run's shell calls,
   // for the Review tab. Writes nothing.
   shell_writes: ["ordinary"],

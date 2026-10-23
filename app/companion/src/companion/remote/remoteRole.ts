@@ -62,6 +62,10 @@ export const DESK_ONLY_COMMANDS = [
   // workspace against the app-wide default and tells the daemon, from
   // the window holding the app's duties -- which a Device never is.
   "set_headroom_workspaces",
+  // Publishing what the app works out about a workspace for its agents
+  // (v79): the desk's snapshot, sent from the window holding the app's
+  // duties for the same reason as the line above.
+  "publish_workspace_insights",
   // The updater.
   "check_for_update",
   "install_update",

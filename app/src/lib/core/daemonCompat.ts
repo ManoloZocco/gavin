@@ -756,6 +756,20 @@ export const FEATURE_MIN_VERSION = {
   // Its ssh twin: the same read against an ssh workspace's HOST daemon
   // (`sshActivityBlocked` in sshWorkspace.ts), never the local one's.
   sshActivityCalendar: 78,
+  // Workspace insights (v79): the app publishes what it works out about
+  // each workspace -- effective agent config, card lint, worktree setup
+  // proposal, setup steps left -- for gavin-mcp's
+  // `gavin_get_effective_config` and `gavin_doctor` to read. Two new
+  // request TYPES, so `min_version_for` already keeps them off an older
+  // daemon's wire; this entry is what keeps the publisher from asking at
+  // all, rather than taking a version error on every workspace change.
+  //
+  // Consumer: `workspaceInsightsState.ts`'s publisher, which skips a
+  // workspace whose daemon is older. Nothing on screen depends on it.
+  workspaceInsights: 79,
+  // Its ssh twin: an ssh workspace's agents ask its HOST's daemon, so
+  // that is the version that counts (`sshInsightsBlocked`).
+  sshWorkspaceInsights: 79,
 } as const;
 
 export type Feature = keyof typeof FEATURE_MIN_VERSION;

@@ -234,6 +234,7 @@ pub fn run() {
             session::card_session,
             session::card_runs,
             session::activity_runs,
+            session::publish_workspace_insights,
             session::shell_writes,
             scheduled::list_scheduled_tasks,
             scheduled::create_scheduled_task,
