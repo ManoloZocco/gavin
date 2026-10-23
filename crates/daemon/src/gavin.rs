@@ -115,6 +115,29 @@ fn clamp_frontmatter_list(raw: &str, warning: &mut bool) -> Vec<String> {
     items
 }
 
+/// `clamp_frontmatter_list`, saying which field was cut when it was.
+fn clamp_list_noting(raw: &str, key: &str, warning: &mut bool, warnings: &mut Vec<String>) -> Vec<String> {
+    let mut clamped = false;
+    let items = clamp_frontmatter_list(raw, &mut clamped);
+    if clamped {
+        *warning = true;
+        warnings.push(clamped_note(key));
+    }
+    items
+}
+
+fn clamped_note(key: &str) -> String {
+    format!("{key}: too long, so it was cut short")
+}
+
+fn kind_word(kind: CardKind) -> &'static str {
+    match kind {
+        CardKind::Note => "note",
+        CardKind::Task => "task",
+        CardKind::Plan => "plan",
+    }
+}
+
 /// Strict, spelled-out match rather than Priority::from_str: from_str maps
 /// every unrecognized value to Priority::None, which would make a typo'd
 /// `priority: hgih` indistinguishable from a deliberate `priority: none` --
@@ -136,6 +159,14 @@ fn parse_priority(value: &str) -> Option<Priority> {
 pub fn plan_file_info(path: &Path, content: &str) -> PlanFileInfo {
     let fm = parse_frontmatter(content);
     let mut warning = fm.warning;
+    // What `warning` stands for, one line per field gavin could not read
+    // as written: the flag alone left the human with "some fields may be
+    // unreadable" and an agent with a bare `parseWarning: true`, neither
+    // of which says what to fix.
+    let mut warnings: Vec<String> = Vec::new();
+    if fm.warning {
+        warnings.push("frontmatter: the opening `---` is never closed, so no field was read".into());
+    }
     let get = |key: &str| {
         fm.fields
             .iter()
@@ -155,6 +186,7 @@ pub fn plan_file_info(path: &Path, content: &str) -> PlanFileInfo {
             let parsed = parse_priority(&raw);
             if parsed.is_none() {
                 warning = true;
+                warnings.push(format!("priority: `{raw}` is not none, low, medium, high or urgent"));
             }
             parsed
         }
@@ -165,6 +197,7 @@ pub fn plan_file_info(path: &Path, content: &str) -> PlanFileInfo {
             Ok(n) => Some(n),
             Err(_) => {
                 warning = true;
+                warnings.push(format!("order: `{raw}` is not a whole number"));
                 None
             }
         },
@@ -177,6 +210,7 @@ pub fn plan_file_info(path: &Path, content: &str) -> PlanFileInfo {
             "plan" => CardKind::Plan,
             _ => {
                 warning = true;
+                warnings.push(format!("kind: `{raw}` is not note, task or plan; read as plan"));
                 CardKind::Plan
             }
         },
@@ -190,12 +224,13 @@ pub fn plan_file_info(path: &Path, content: &str) -> PlanFileInfo {
                 Some(p)
             } else {
                 warning = true;
+                warnings.push(format!("parent: only a task can have one; ignored on this {}", kind_word(kind)));
                 None
             }
         }
     };
     let labels: Vec<String> = get("labels")
-        .map(|raw| clamp_frontmatter_list(&raw, &mut warning))
+        .map(|raw| clamp_list_noting(&raw, "labels", &mut warning, &mut warnings))
         .unwrap_or_default();
     // Split exactly like labels, and kept RAW (within the length/count
     // caps above): an entry that does not resolve -- a moved file, a
@@ -206,7 +241,7 @@ pub fn plan_file_info(path: &Path, content: &str) -> PlanFileInfo {
     // Parsed on every card kind (a note is a fine place to park a
     // reference); only task and plan cards put it in a prompt.
     let attachments: Vec<String> = get("attachments")
-        .map(|raw| clamp_frontmatter_list(&raw, &mut warning))
+        .map(|raw| clamp_list_noting(&raw, "attachments", &mut warning, &mut warnings))
         .unwrap_or_default();
     // Unreadable degrades to None PLUS a warning, unlike `labels` and
     // `attachments` which keep whatever junk was written. Those two are
@@ -220,6 +255,9 @@ pub fn plan_file_info(path: &Path, content: &str) -> PlanFileInfo {
             let parsed = Complexity::parse(&raw);
             if parsed.is_none() {
                 warning = true;
+                warnings.push(format!(
+                    "complexity: `{raw}` is not trivial, simple, moderate, complex or intricate; the card runs the workspace agent"
+                ));
             }
             parsed
         }
@@ -241,6 +279,7 @@ pub fn plan_file_info(path: &Path, content: &str) -> PlanFileInfo {
         let (v, clamped) = clamp_frontmatter_value(v.trim());
         if clamped {
             warning = true;
+            warnings.push(clamped_note("agent"));
         }
         (!v.is_empty()).then_some(v)
     });
@@ -248,6 +287,7 @@ pub fn plan_file_info(path: &Path, content: &str) -> PlanFileInfo {
         let (v, clamped) = clamp_frontmatter_value(v.trim());
         if clamped {
             warning = true;
+            warnings.push(clamped_note("model"));
         }
         (!v.is_empty()).then_some(v)
     });
@@ -257,6 +297,7 @@ pub fn plan_file_info(path: &Path, content: &str) -> PlanFileInfo {
         let (v, clamped) = clamp_frontmatter_value(v.trim());
         if clamped {
             warning = true;
+            warnings.push(clamped_note("effort"));
         }
         (!v.is_empty()).then_some(v)
     });
@@ -269,8 +310,14 @@ pub fn plan_file_info(path: &Path, content: &str) -> PlanFileInfo {
         None => false,
         Some(raw) => match parse_direct(&raw) {
             Some(d) if kind == CardKind::Task => d,
-            _ => {
+            Some(_) => {
                 warning = true;
+                warnings.push(format!("direct: only a task can be direct; ignored on this {}", kind_word(kind)));
+                false
+            }
+            None => {
+                warning = true;
+                warnings.push(format!("direct: `{raw}` is not true or false; read as false"));
                 false
             }
         },
@@ -281,6 +328,7 @@ pub fn plan_file_info(path: &Path, content: &str) -> PlanFileInfo {
             let (title, clamped) = clamp_frontmatter_value(&raw);
             if clamped {
                 warning = true;
+                warnings.push(clamped_note("title"));
             }
             if title.is_empty() { stem } else { title }
         }
@@ -306,6 +354,7 @@ pub fn plan_file_info(path: &Path, content: &str) -> PlanFileInfo {
         checklist_done,
         checklist_total,
         parse_warning: warning,
+        parse_warnings: warnings,
         // Always `Some` from here: this daemon DID look. `None` is
         // reserved for the two honest "never looked" cases -- an older
         // daemon that has no such field at all, and the oversize card
@@ -2408,6 +2457,7 @@ fn oversize_plan_file_info(path: &Path) -> PlanFileInfo {
         checklist_done: 0,
         checklist_total: 0,
         parse_warning: true,
+        parse_warnings: vec!["file: too large to read, so only its name is shown".into()],
         attachments: Vec::new(),
         complexity: None,
         agent: None,
@@ -4086,6 +4136,37 @@ mod tests {
         assert_eq!(p.status, None);
         assert_eq!(p.title, "auth-flow");
         assert!(!p.parse_warning);
+    }
+
+    // The flag said only that SOMETHING was unreadable. Each reason now
+    // names its field, which is what the board and an agent act on.
+    #[test]
+    fn parse_warnings_name_the_field_and_why() {
+        let p = plan("---\npriority: hgih\norder: soon\ncomplexity: huge\n---\n");
+        assert!(p.parse_warning);
+        assert_eq!(p.parse_warnings.len(), 3, "{:?}", p.parse_warnings);
+        assert!(p.parse_warnings[0].starts_with("priority: `hgih`"));
+        assert!(p.parse_warnings[1].starts_with("order: `soon`"));
+        assert!(p.parse_warnings[2].starts_with("complexity: `huge`"));
+
+        let note = plan("---\nkind: note\nparent: auth.md\ndirect: true\n---\n");
+        assert_eq!(
+            note.parse_warnings,
+            vec![
+                "parent: only a task can have one; ignored on this note".to_string(),
+                "direct: only a task can be direct; ignored on this note".to_string(),
+            ]
+        );
+        assert!(plan("---\nkind: tsak\n---\n").parse_warnings[0].starts_with("kind: `tsak`"));
+        assert!(plan("---\nkind: task\ndirect: yes\n---\n").parse_warnings[0].starts_with("direct: `yes`"));
+        assert!(plan("---\nstatus: To Do\n").parse_warnings[0].starts_with("frontmatter:"));
+    }
+
+    #[test]
+    fn a_clean_card_has_no_parse_warnings() {
+        let p = plan("---\nkind: task\nstatus: To Do\npriority: high\nparent: auth.md\n---\n");
+        assert!(!p.parse_warning);
+        assert!(p.parse_warnings.is_empty());
     }
 
     #[test]

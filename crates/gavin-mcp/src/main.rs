@@ -729,7 +729,7 @@ fn tool_definitions() -> Value {
         { "name": "gavin_init_root", "description": "Initialize .gavin-root (PRD template, plans/docs/specs) in a folder; idempotent, never overwrites.", "inputSchema": { "type": "object", "properties": {
             "path": { "type": "string", "description": "Defaults to the current directory" }
         } } },
-        { "name": "gavin_get_board", "description": "The workspace kanban board: columns (the status vocabulary) and the human's free-form cards. Requires the workspace open in gavin.", "inputSchema": { "type": "object", "properties": {} } },
+        { "name": "gavin_get_board", "description": "The workspace kanban board: its columns (the status vocabulary, `position` is their order and the highest is the done column rails read) and its label vocabulary. The cards themselves are in gavin_get_tree. Requires the workspace open in gavin.", "inputSchema": { "type": "object", "properties": {} } },
         { "name": "gavin_promote_task", "description": "Promote a plan's checklist item into a nested task card (rewrites the item into a link to the new file).", "inputSchema": { "type": "object", "properties": {
             "plan_path": { "type": "string" },
             "item": { "type": "string", "description": "The checklist item's exact text" }
@@ -1075,17 +1075,76 @@ fn dispatch_tool(
         Response::SessionCreated { id, .. } => {
             Ok(format!("spawned session {id} — visible on the Agents page in gavin"))
         }
-        Response::PlanFieldSet { path } => Ok(match requested_path {
-            Some(before) if before != path => {
-                let carried = nested_children_titles(root, &path, transport);
-                moved_card_note(&path, &carried)
-            }
-            _ => "ok".to_string(),
-        }),
+        Response::PlanFieldSet { path } => {
+            let reply = match requested_path {
+                Some(before) if before != path => {
+                    let carried = nested_children_titles(root, &path, transport);
+                    moved_card_note(&path, &carried)
+                }
+                _ => "ok".to_string(),
+            };
+            Ok(match status_written(&req) {
+                Some(status) => match unknown_status_note(root, status, transport) {
+                    Some(note) => format!("{reply} — {note}"),
+                    None => reply,
+                },
+                None => reply,
+            })
+        }
         Response::Ok => Ok("ok".to_string()),
         Response::Error { message } => Err(anyhow::anyhow!(message)),
         other => Err(anyhow::anyhow!("unexpected response: {other:?}")),
     }
+}
+
+/// The status a `gavin_set_plan_field` call wrote, when it wrote one.
+fn status_written(req: &Request) -> Option<&str> {
+    match req {
+        Request::SetPlanFrontmatterField { key, value, .. } if key == "status" && !value.trim().is_empty() => {
+            Some(value.as_str())
+        }
+        _ => None,
+    }
+}
+
+/// The board's column match: lowercase, every run of anything else one
+/// dash (`slugStatus` in the app), so "to do" and "To Do" are one column.
+fn status_slug(s: &str) -> String {
+    let mut slug = String::new();
+    for c in s.to_lowercase().chars() {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c);
+        } else if !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    slug.trim_matches('-').to_string()
+}
+
+/// Said when a written status matches no column. The write still stands
+/// -- a new column may be what was meant -- but status is free text, so a
+/// typo used to make a column of its own with nothing said to the agent
+/// that wrote it. Silent on any failure to read the board: this is a
+/// courtesy on a write that already succeeded.
+fn unknown_status_note(root: &Path, status: &str, transport: &mut dyn DaemonTransport) -> Option<String> {
+    let columns = match transport.request(&Request::GetBoardByRoot { root_path: root.to_string_lossy().to_string() }) {
+        Ok(Response::Board { columns, .. }) => columns,
+        _ => return None,
+    };
+    if columns.is_empty() {
+        return None;
+    }
+    let wanted = status_slug(status);
+    if columns.iter().any(|c| status_slug(&c.name) == wanted) {
+        return None;
+    }
+    let mut names: Vec<&protocol::Column> = columns.iter().collect();
+    names.sort_by_key(|c| c.position);
+    let list = names.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", ");
+    Some(format!(
+        "note: `{status}` matches no column, so the board shows it as a new column of its own. \
+         The columns are: {list}. If that was not meant, write one of them instead."
+    ))
 }
 
 /// Search results as an agent reads them: the fact first, everything
@@ -2991,6 +3050,7 @@ mod tests {
             checklist_done: 0,
             checklist_total: 0,
             parse_warning: false,
+            parse_warnings: Vec::new(),
             modified_at: None,
             attachments: vec![],
             complexity: None,
@@ -4395,6 +4455,52 @@ mod tests {
             &mut t,
         );
         assert!(matches!(&t.requests[0], Request::SetPlanFrontmatterField { value, .. } if value.is_empty()));
+    }
+
+    fn columns(names: &[&str]) -> Response {
+        Response::Board {
+            columns: names
+                .iter()
+                .enumerate()
+                .map(|(i, n)| protocol::Column { id: format!("c{i}"), name: (*n).into(), position: i as i64 })
+                .collect(),
+            labels: vec![],
+            card_sessions: vec![],
+        }
+    }
+
+    // Status is free text: a typo makes a column of its own. The write
+    // still stands, and the reply now says so and names the columns.
+    #[test]
+    fn set_plan_field_says_when_a_status_matches_no_column() {
+        let board = || columns(&["To Do", "In Progress", "Review", "Done"]);
+        let mut t = mock(vec![Response::PlanFieldSet { path: "/ws/.gavin-root/plans/a.md".into() }, board()]);
+        let text = call_with(
+            "gavin_set_plan_field",
+            json!({ "path": ".gavin-root/plans/a.md", "key": "status", "value": "Reveiw" }),
+            &mut t,
+        );
+        assert!(text.starts_with("ok — note: `Reveiw` matches no column"), "{text}");
+        assert!(text.contains("To Do, In Progress, Review, Done"), "{text}");
+        assert!(matches!(&t.requests[1], Request::GetBoardByRoot { .. }));
+
+        // Case and spacing are the board's own match: no note.
+        let mut t = mock(vec![Response::PlanFieldSet { path: "/ws/.gavin-root/plans/a.md".into() }, board()]);
+        let text = call_with(
+            "gavin_set_plan_field",
+            json!({ "path": ".gavin-root/plans/a.md", "key": "status", "value": " review " }),
+            &mut t,
+        );
+        assert_eq!(text, "ok");
+
+        // Not a status write: the board is never read.
+        let mut t = mock(vec![Response::PlanFieldSet { path: "/ws/.gavin-root/plans/a.md".into() }]);
+        call_with(
+            "gavin_set_plan_field",
+            json!({ "path": ".gavin-root/plans/a.md", "key": "priority", "value": "high" }),
+            &mut t,
+        );
+        assert_eq!(t.requests.len(), 1);
     }
 
     /// The search tool asks for this workspace's root, takes topics as

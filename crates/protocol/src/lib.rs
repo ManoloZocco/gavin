@@ -5411,6 +5411,14 @@ pub struct PlanFileInfo {
     pub checklist_done: u32,
     pub checklist_total: u32,
     pub parse_warning: bool,
+    /// What `parse_warning` stands for: one line per field gavin could
+    /// not read as written, each led by the field's name ("priority:
+    /// `hgih` is not ..."). The flag alone told the board "some fields may
+    /// be unreadable" and an agent nothing at all. `serde(default)` so an
+    /// older daemon's tree still parses; empty is not serialized, so a
+    /// clean card costs nothing on the wire.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parse_warnings: Vec<String>,
     /// The card file's mtime, as whole seconds since the unix epoch, or
     /// None when the file could not be stat'd. The archive grid is
     /// ordered by it -- for an archived card it is effectively "when it
@@ -8047,6 +8055,7 @@ mod tests {
                     checklist_done: 0,
                     checklist_total: 0,
                     parse_warning: false,
+                    parse_warnings: Vec::new(),
                     modified_at: None,
                     attachments: vec!["docs/spec.md".to_string()],
                     complexity: Some(Complexity::Moderate),
