@@ -219,6 +219,7 @@ const REMOTE_COMMAND_TABLE: &[(&str, RemoteAllowance)] = &[
     ("unlink_card_session", RemoteAllowance::Allowed),
     ("promote_checklist_item", RemoteAllowance::Allowed),
     ("set_root_config_field", RemoteAllowance::Allowed),
+    ("set_worktree_setup", RemoteAllowance::Allowed),
     ("get_agent_model_defaults", RemoteAllowance::Allowed),
     ("set_agent_model_default", RemoteAllowance::Allowed),
     ("get_agent_skills_marks", RemoteAllowance::Allowed),

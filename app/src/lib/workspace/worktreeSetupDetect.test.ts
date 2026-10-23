@@ -481,6 +481,13 @@ describe("the notes under the proposal", () => {
     expect(note).toContain("holds it off until you approve");
   });
 
+  it("points at the editor instead of the file once there is a writer", () => {
+    const note = comparisonNote(compareSetup([], one), true);
+    expect(note).toContain("not written");
+    expect(note).toContain("Use proposal");
+    expect(note).not.toContain("config.toml");
+  });
+
   it("counts what the declared value lacks", () => {
     expect(comparisonNote(compareSetup(["make"], one))).toMatch(/^1 detected line is not in the declared setup/);
     expect(comparisonNote(compareSetup(["make"], two))).toMatch(/^2 detected lines are not in the declared setup/);

@@ -8399,6 +8399,50 @@ pub async fn set_root_config_field(
     }
 }
 
+/// What a `[worktree] setup` write did: whether the file changed, and the
+/// lines it declares now.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeSetupWrite {
+    pub written: bool,
+    pub lines: Vec<String>,
+}
+
+async fn set_worktree_setup_impl(
+    lanes: &DaemonLanes,
+    root_path: String,
+    lines: Vec<String>,
+    only_if_absent: bool,
+) -> anyhow::Result<WorktreeSetupWrite> {
+    match lanes.request(Request::SetWorktreeSetup { root_path, lines, only_if_absent }).await? {
+        Response::WorktreeSetupWritten { written, lines } => Ok(WorktreeSetupWrite { written, lines }),
+        Response::Error { message } => anyhow::bail!(message),
+        other => anyhow::bail!("expected WorktreeSetupWritten, got {other:?}"),
+    }
+}
+
+/// Writes `[worktree] setup` (v80), for the workspace Settings editor.
+/// Routed by the root like `set_root_config_field`: an ssh workspace's
+/// config.toml lives on its host. The editor checks
+/// FEATURE_MIN_VERSION.worktreeSetupEditor first; an older daemon is
+/// refused here before anything is sent. Whether the write is approved
+/// is the app's decision (the trust hash in config.json), not this
+/// command's: it only writes.
+#[tauri::command]
+pub async fn set_worktree_setup(
+    root_path: String,
+    lines: Vec<String>,
+    only_if_absent: bool,
+    app_handle: AppHandle,
+    state: State<'_, CommandConnection>,
+    compat: State<'_, DaemonCompatState>,
+) -> Result<WorktreeSetupWrite, String> {
+    let route = crate::remote::route_for_root(&app_handle, Some(&root_path))?;
+    set_worktree_setup_impl(&lanes_for(route, &state, &compat), root_path, lines, only_if_absent)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod adopt_session_tests {
     use super::test_support::*;
@@ -8948,6 +8992,7 @@ mod gate_tests {
             Request::RemoveExternalGavinContext { root_path: "r".into(), folder: "f".into() },
             Request::SetPlanFrontmatterField { path: "p".into(), key: "k".into(), value: "v".into() },
             Request::SetRootConfigField { root_path: "r".into(), key: "k".into(), value: "v".into() },
+            Request::SetWorktreeSetup { root_path: "r".into(), lines: vec![], only_if_absent: false },
             Request::ScanGavinRoot { root_path: "r".into() },
             Request::ReadPrd { root_path: "r".into() },
             Request::CreatePlan {
@@ -9248,6 +9293,38 @@ mod kanban_command_tests {
         assert_eq!(runs.len(), 2);
         assert_eq!(runs[0].session_id, "s-2");
         assert_eq!(runs[1].outcome, "exited");
+    }
+
+    /// The editor's write goes out as the request it names -- the plain
+    /// form when the human saves -- and the reply comes back as the
+    /// camelCase shape `backend.setWorktreeSetup` reads.
+    #[test]
+    fn set_worktree_setup_impl_sends_the_lines_and_returns_what_is_declared() {
+        let (client, captured, _dir) = fake_daemon_capturing_requests(vec![Response::WorktreeSetupWritten {
+            written: true,
+            lines: vec!["npm ci".to_string()],
+        }]);
+        let got = block_on(set_worktree_setup_impl(
+            &lanes_over(client),
+            "/ws".to_string(),
+            vec!["npm ci".to_string()],
+            false,
+        ))
+        .unwrap();
+        assert_eq!(got, WorktreeSetupWrite { written: true, lines: vec!["npm ci".to_string()] });
+        assert_eq!(serde_json::to_value(&got).unwrap(), serde_json::json!({ "written": true, "lines": ["npm ci"] }));
+        match &captured.lock().unwrap()[0] {
+            Request::SetWorktreeSetup { root_path, lines, only_if_absent } => {
+                assert_eq!(root_path, "/ws");
+                assert_eq!(lines, &vec!["npm ci".to_string()]);
+                assert!(!only_if_absent);
+            }
+            other => panic!("wrong request: {other:?}"),
+        }
+
+        let (client, _dir) = fake_daemon_replying_with(vec![Response::Error { message: "line 1 is blank".into() }]);
+        let err = block_on(set_worktree_setup_impl(&lanes_over(client), "/ws".into(), vec![" ".into()], false)).unwrap_err();
+        assert!(err.to_string().contains("blank"), "{err}");
     }
 
     #[test]

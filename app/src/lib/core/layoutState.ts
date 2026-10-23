@@ -29,7 +29,13 @@ import {
   type NotifyPrefs,
   type SessionStatus,
 } from "$lib/core/notifications";
-import { initGavinListeners, watchRootedWorkspaces, gavinTrees, worktreeSetups } from "$lib/core/gavinState";
+import {
+  initGavinListeners,
+  refreshWorktreeSetup,
+  watchRootedWorkspaces,
+  gavinTrees,
+  worktreeSetups,
+} from "$lib/core/gavinState";
 import {
   handleRemoteLinkLost,
   handleRemoteLinkReady,
@@ -92,6 +98,7 @@ import {
   trustedAgentConfig,
   type ExecutionKeys,
 } from "$lib/workspace/workspaceTrust";
+import { setupSaveStamp } from "$lib/workspace/worktreeSetupEditor";
 import {
   cardContentDigest,
   cardContentReviewed,
@@ -2989,6 +2996,33 @@ export async function setAgentField(
       hasExecutionKeys(keys) ? executionKeysHash(keys) : undefined
     );
   }
+}
+
+/// The Settings editor's Save for `[worktree] setup` (v80): writes the
+/// lines through the daemon and, when that approves nothing the human was
+/// not shown, re-stamps the trust marker in the same breath — the rule is
+/// `setupSaveStamp`'s. Throws on a refused write (unlike `setAgentField`),
+/// so the editor shows the daemon's reason in place, and stamps nothing
+/// then: a marker for lines config.toml never took would pre-approve
+/// whatever lands in the key next.
+///
+/// The human's own writer only. An agent's proposal reaches the daemon
+/// through `gavin_propose_worktree_setup` and never passes here, so it
+/// lands unapproved and the trust notice asks.
+export async function saveWorktreeSetup(
+  workspaceId: string,
+  lines: string[]
+): Promise<{ written: boolean; lines: string[]; stamped: boolean }> {
+  const ws = get(layoutState).workspaces.find((w) => w.id === workspaceId);
+  if (!ws?.rootPath) throw new Error("Bind a root folder before editing the worktree setup.");
+  const before = configTrustFor(workspaceId);
+  const result = await backend.setWorktreeSetup(ws.rootPath, lines, false);
+  const decision = result.written ? setupSaveStamp(before, result.lines) : null;
+  if (decision) await stampConfigTrust(workspaceId, decision.stamp);
+  // Rather than wait for the watcher's push: the editor and the trust
+  // notice both read this store, and both should show the saved value now.
+  await refreshWorktreeSetup(workspaceId, ws.rootPath);
+  return { ...result, stamped: decision !== null };
 }
 
 /// Writes a new workspace agent profile together with that profile's

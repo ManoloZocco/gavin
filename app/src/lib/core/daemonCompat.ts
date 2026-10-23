@@ -770,6 +770,16 @@ export const FEATURE_MIN_VERSION = {
   // Its ssh twin: an ssh workspace's agents ask its HOST's daemon, so
   // that is the version that counts (`sshInsightsBlocked`).
   sshWorkspaceInsights: 79,
+  // The `[worktree] setup` writer (v80,
+  // `lc-08-propose-worktree-setup-from-lockfiles.md`).
+  // `Request::SetWorktreeSetup` is a new request TYPE, so `min_version_for`
+  // already refuses it against an older daemon and nothing lands half
+  // written; this entry is for what the editor SAYS. Its consumer is the
+  // Worktree setup editor in the workspace Settings (`WorktreeSetupPanel`,
+  // through `worktreeSetupEditor.ts`): Save and "Use proposal" grey out
+  // with this reason, and the panel keeps showing the declared lines and
+  // the copyable proposal it showed before there was a writer.
+  worktreeSetupEditor: 80,
 } as const;
 
 export type Feature = keyof typeof FEATURE_MIN_VERSION;

@@ -2086,6 +2086,24 @@ export function worktreeSetup(rootPath: string): Promise<string[]> {
   return invoke("worktree_setup", { rootPath });
 }
 
+/// What a `[worktree] setup` write did: whether config.toml changed, and
+/// the lines it declares now.
+export interface WorktreeSetupWrite {
+  written: boolean;
+  lines: string[];
+}
+
+/// Writes `[worktree] setup` through the daemon (v80). `onlyIfAbsent`
+/// leaves a declared value alone; the Settings editor sends false. Gate
+/// on FEATURE_MIN_VERSION.worktreeSetupEditor first.
+export function setWorktreeSetup(
+  rootPath: string,
+  lines: string[],
+  onlyIfAbsent: boolean
+): Promise<WorktreeSetupWrite> {
+  return invoke("set_worktree_setup", { rootPath, lines, onlyIfAbsent });
+}
+
 // --- Git tab SP4: history ---------------------------------------------------
 
 export function gitLog(cwd: string, all: boolean, skip: number, limit: number): Promise<LogPage> {

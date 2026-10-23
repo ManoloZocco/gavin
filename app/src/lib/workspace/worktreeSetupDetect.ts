@@ -1,10 +1,10 @@
 /// A proposed `[worktree] setup`, read off the lockfiles a repository
 /// already carries.
 ///
-/// `[worktree] setup` has no editor and stays inert until a human approves
-/// it through the trust hash (`workspaceTrust.ts`), so most workspaces cut
-/// worktrees with no install step and every parallel agent starts in a
-/// checkout that does not build. Which install a checkout needs is not a
+/// `[worktree] setup` stays inert until a human approves it through the
+/// trust hash (`workspaceTrust.ts`), and for a long time nothing proposed
+/// a value, so most workspaces cut worktrees with no install step and
+/// every parallel agent starts in a checkout that does not build. Which install a checkout needs is not a
 /// matter of taste: a `package-lock.json` means `npm ci`, a `Cargo.lock`
 /// means `cargo fetch`. This module derives that list. It never runs
 /// anything and never writes anything: what it returns is a PROPOSAL for
@@ -254,19 +254,22 @@ export function compareSetup(
 }
 
 /// The sentence under the proposal: what it is against the declared
-/// value, and that nothing was written. Settings has no writer for this
-/// key yet (the daemon's config writer refuses it), so the way in is the
-/// human pasting the block — after which the trust gate asks for the same
-/// approval any other edit to the file would.
-export function comparisonNote(c: SetupComparison): string {
+/// value, and that nothing was written.
+///
+/// `editable` says whether the Settings editor can write the key (a v80
+/// daemon, `worktreeSetupEditor.ts`): then the way in is "Use proposal"
+/// and Save. Against an older daemon there is no writer, so the way in is
+/// the human pasting the block — after which the trust gate asks for the
+/// same approval any other edit to the file would.
+export function comparisonNote(c: SetupComparison, editable = false): string {
   switch (c.state) {
     case "none":
       return "No lockfile found that gavin knows an install for.";
     case "propose":
-      return (
-        "Proposed from this repo's lockfiles, not written. Add it to .gavin-root/config.toml; " +
-        "gavin holds it off until you approve it."
-      );
+      return editable
+        ? "Proposed from this repo's lockfiles, not written. Use proposal fills the editor; nothing is written until you save."
+        : "Proposed from this repo's lockfiles, not written. Add it to .gavin-root/config.toml; " +
+            "gavin holds it off until you approve it.";
     case "matches":
       return "The declared setup already installs every lockfile found.";
     case "differs": {

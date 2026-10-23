@@ -1,16 +1,22 @@
 <script lang="ts">
   /// `[worktree] setup` in the workspace Settings: what is declared, what
-  /// the trust gate does with it, and what this repo's lockfiles say it
-  /// should be. A thin template over `worktreeSetupDetect.ts`.
+  /// the trust gate does with it, what this repo's lockfiles say it should
+  /// be, and a minimal editor for it. A thin template over
+  /// `worktreeSetupDetect.ts` (the proposal) and `worktreeSetupEditor.ts`
+  /// (the editor's text, its checks, and what a save does to trust).
   ///
-  /// Read-only on purpose. The proposal is never written and never run:
-  /// the daemon's config writer does not accept this key yet, and even
-  /// once it does, a line lands inert until the human approves it through
-  /// the same trust sheet every other config.toml command goes through.
+  /// Nothing here runs anything. "Use proposal" only fills the editor;
+  /// Save writes config.toml through the daemon (`saveWorktreeSetup`),
+  /// and a line still runs only once the human's approval covers it — the
+  /// save carries that approval when it approves nothing unseen. Against a
+  /// daemon older than the writer the panel is read-only again, with the
+  /// proposal offered as a TOML block to paste.
+  import { untrack } from "svelte";
   import { writeText } from "@tauri-apps/plugin-clipboard-manager";
   import * as backend from "$lib/core/backend";
+  import { featureBlockedReason } from "$lib/core/daemonCompat";
   import { worktreeSetups } from "$lib/core/gavinState";
-  import { configTrusts } from "$lib/core/layoutState";
+  import { configTrusts, daemonCompat, saveWorktreeSetup } from "$lib/core/layoutState";
   import ConfigTrustNotice from "$lib/workspace/ConfigTrustNotice.svelte";
   import {
     compareSetup,
@@ -22,6 +28,15 @@
     proposeForWorkspace,
     type SetupProposal,
   } from "$lib/workspace/worktreeSetupDetect";
+  import {
+    editorDirty,
+    editorLines,
+    editorProblem,
+    editorText,
+    proposalText,
+    reseededDraft,
+    saveNote,
+  } from "$lib/workspace/worktreeSetupEditor";
 
   interface Props {
     workspaceId: string;
@@ -35,6 +50,7 @@
   const declared = $derived($worktreeSetups[workspaceId] ?? []);
   const trust = $derived($configTrusts(workspaceId));
   const status = $derived(declaredSetupStatus(declared.length, trust));
+  const editBlocked = $derived(featureBlockedReason($daemonCompat, "worktreeSetupEditor"));
 
   let proposal = $state<SetupProposal | null>(null);
   let scanning = $state(false);
@@ -47,11 +63,38 @@
   /// slow scan of the previous root must not land over a newer one.
   let scanToken = 0;
 
+  /// The editor. `seeded` is the declared text it last took, so a push
+  /// that moves the file replaces untouched text and never edited text.
+  let draft = $state("");
+  let seeded: string | null = null;
+  let saving = $state(false);
+  let saveError = $state<string | null>(null);
+  let savedNote = $state<string | null>(null);
+  let saveToken = 0;
+
+  $effect(() => {
+    const next = editorText(declared);
+    untrack(() => {
+      draft = reseededDraft(draft, seeded, next);
+      seeded = next;
+    });
+  });
+
+  const draftLines = $derived(editorLines(draft));
+  const problem = $derived(editorProblem(draftLines));
+  const dirty = $derived(editorDirty(draft, declared));
+  const canSave = $derived(editBlocked === null && dirty && problem === null && !saving);
+
   const comparison = $derived(proposal ? compareSetup(declared, proposal.lines) : null);
   const missing = $derived(new Set(comparison?.missing.map((p) => p.line) ?? []));
   const caveats = $derived(proposal ? proposalCaveats(proposal) : []);
   const toml = $derived(proposal ? proposalToml(proposal.lines) : "");
-  const offerCopy = $derived(comparison?.state === "propose" || comparison?.state === "differs");
+  const offerCopy = $derived(
+    editBlocked !== null && (comparison?.state === "propose" || comparison?.state === "differs")
+  );
+  const offerUse = $derived(
+    editBlocked === null && !!proposal && proposal.lines.length > 0 && proposalText(proposal.lines) !== draft
+  );
 
   function absolute(rel: string): string {
     const base = rootPath.replace(/[\\/]+$/, "");
@@ -91,6 +134,38 @@
     copied = true;
     setTimeout(() => (copied = false), 1500);
   }
+
+  function useProposal(): void {
+    if (!proposal) return;
+    draft = proposalText(proposal.lines);
+    savedNote = null;
+    saveError = null;
+  }
+
+  function revert(): void {
+    draft = editorText(declared);
+    saveError = null;
+  }
+
+  async function save(): Promise<void> {
+    if (!canSave) return;
+    const mine = ++saveToken;
+    saving = true;
+    saveError = null;
+    savedNote = null;
+    try {
+      const result = await saveWorktreeSetup(workspaceId, draftLines);
+      if (mine !== saveToken) return;
+      savedNote = saveNote(result, result.stamped);
+      draft = editorText(result.lines);
+      seeded = draft;
+    } catch (e) {
+      if (mine !== saveToken) return;
+      saveError = e instanceof Error ? e.message : String(e);
+    } finally {
+      if (mine === saveToken) saving = false;
+    }
+  }
 </script>
 
 <div class="wts">
@@ -98,14 +173,25 @@
   <p class="hint">
     What a new worktree runs before its agent starts, from <code>[worktree] setup</code> in
     .gavin-root/config.toml. The lines run one after another in the new checkout's root, and a
-    failure stops the rest.
+    failure stops the rest. Write a nested install as a subshell: <code>(cd app &amp;&amp; npm ci)</code>.
   </p>
 
   <ConfigTrustNotice {workspaceId} />
 
   <div class="block">
     <span class="label">Declared</span>
-    {#if declared.length > 0}
+    {#if editBlocked === null}
+      <textarea
+        class="editor"
+        rows={Math.min(Math.max(draftLines.length + 1, 3), 12)}
+        spellcheck="false"
+        autocomplete="off"
+        placeholder="One command per line, e.g. npm ci"
+        aria-label="Worktree setup commands, one per line"
+        bind:value={draft}
+        oninput={() => (savedNote = null)}
+      ></textarea>
+    {:else if declared.length > 0}
       <ul class="lines">
         {#each declared as line, i (i)}
           <li><code>{line}</code></li>
@@ -113,6 +199,27 @@
       </ul>
     {/if}
     <p class="hint" class:warn={declared.length > 0 && !trust.trusted}>{status}</p>
+    {#if editBlocked}
+      <p class="hint">Editing here: {editBlocked}</p>
+    {:else}
+      {#if problem}
+        <p class="hint error">{problem}</p>
+      {/if}
+      {#if saveError}
+        <p class="hint error">Couldn't save: {saveError}</p>
+      {/if}
+      {#if savedNote}
+        <p class="hint">{savedNote}</p>
+      {/if}
+      <div class="actions">
+        <button type="button" class="save" disabled={!canSave} onclick={() => void save()}>
+          {saving ? "Saving…" : "Save setup"}
+        </button>
+        {#if dirty}
+          <button type="button" class="linkish" disabled={saving} onclick={revert}>Revert</button>
+        {/if}
+      </div>
+    {/if}
   </div>
 
   <div class="block">
@@ -132,7 +239,7 @@
           {/each}
         </ul>
       {/if}
-      <p class="hint">{comparisonNote(comparison)}</p>
+      <p class="hint">{comparisonNote(comparison, editBlocked === null)}</p>
       {#each caveats as caveat (caveat)}
         <p class="hint">{caveat}</p>
       {/each}
@@ -141,6 +248,9 @@
       {/if}
     {/if}
     <div class="actions">
+      {#if offerUse}
+        <button type="button" class="linkish" disabled={saving} onclick={useProposal}>Use proposal</button>
+      {/if}
       {#if offerCopy}
         <button type="button" class="linkish" onclick={() => void copy()}>
           {copied ? "Copied" : "Copy as TOML"}
@@ -224,10 +334,49 @@
     white-space: pre;
     overflow-x: auto;
   }
+  .editor {
+    /* The characters that will run, so never wrapped or reflowed. */
+    display: block;
+    box-sizing: border-box;
+    width: 100%;
+    margin-top: 6px;
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--surface-sunken);
+    color: var(--text);
+    font-family: monospace;
+    font-size: 0.9em;
+    white-space: pre;
+    overflow-x: auto;
+    resize: vertical;
+  }
+  .editor:focus-visible {
+    outline: 2px solid var(--border-accent);
+    outline-offset: 1px;
+  }
   .actions {
     display: flex;
+    align-items: center;
     gap: 14px;
     margin-top: 8px;
+  }
+  button.save {
+    background: var(--surface-overlay);
+    border: none;
+    color: var(--text);
+    padding: 4px 12px;
+    border-radius: 4px;
+    font: inherit;
+    cursor: pointer;
+  }
+  button.save:focus-visible {
+    outline: 2px solid var(--border-accent);
+    outline-offset: 1px;
+  }
+  button.save:disabled {
+    opacity: 0.45;
+    cursor: default;
   }
   button.linkish {
     background: none;

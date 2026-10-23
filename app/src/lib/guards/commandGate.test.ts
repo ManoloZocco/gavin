@@ -338,6 +338,7 @@ const CLASSIFICATION: Record<string, [Bucket, string?]> = {
   unlink_card_session: ["ordinary"],
   promote_checklist_item: ["ordinary"],
   set_root_config_field: ["ordinary"],
+  set_worktree_setup: ["ordinary"],
   get_agent_model_defaults: ["ordinary"],
   set_agent_model_default: ["ordinary"],
   get_agent_skills_marks: ["ordinary"],

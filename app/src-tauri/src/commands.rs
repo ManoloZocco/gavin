@@ -157,6 +157,7 @@ pub const REGISTERED_COMMANDS: &[&str] = &[
     "unlink_card_session",
     "promote_checklist_item",
     "set_root_config_field",
+    "set_worktree_setup",
     "get_agent_model_defaults",
     "set_agent_model_default",
     "get_agent_skills_marks",

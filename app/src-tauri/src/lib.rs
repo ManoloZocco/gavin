@@ -295,6 +295,7 @@ pub fn run() {
             session::unlink_card_session,
             session::promote_checklist_item,
             session::set_root_config_field,
+            session::set_worktree_setup,
             session::get_agent_model_defaults,
             session::set_agent_model_default,
             session::get_agent_skills_marks,
